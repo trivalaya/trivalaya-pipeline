@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""
+Trivalaya Pipeline CLI
+
+Orchestrates trivalaya-data (scraper) and trivalaya-vision (CV) for ML dataset creation.
+
+Usage:
+    # Run full pipeline
+    python -m trivalaya_pipeline run leu 31 --lots 1-100
+    
+    # Run individual steps
+    python -m trivalaya_pipeline scrape leu 31 --lots 1-100
+    python -m trivalaya_pipeline vision --batch 100
+    python -m trivalaya_pipeline export
+    
+    # Show statistics
+    python -m trivalaya_pipeline stats
+    
+    # Validate setup
+    python -m trivalaya_pipeline check
+"""
+
+import argparse
+import sys
+import os
+
+from .pipeline import Pipeline
+
+
+def parse_lot_range(lots_str: str) -> range:
+    """Parse lot range string like '1-100' or '42'."""
+    if '-' in lots_str:
+        start, end = map(int, lots_str.split('-'))
+        return range(start, end + 1)
+    else:
+        n = int(lots_str)
+        return range(n, n + 1)
+
+
+def cmd_check(args, pipeline: Pipeline):
+    """Validate setup and connections."""
+    print("\nValidating pipeline setup...")
+    
+    status = pipeline.validate()
+    
+    print(f"\n{'Component':<20} {'Status':<10}")
+    print("-" * 30)
+    
+    for component, ok in status.items():
+        icon = "✓" if ok else "✗"
+        print(f"{component:<20} {icon}")
+    
+    if all(status.values()):
+        print("\n✓ All components ready!")
+        return 0
+    else:
+        print("\n⚠ Some components unavailable. Check paths and credentials.")
+        return 1
+
+
+def cmd_scrape(args, pipeline: Pipeline):
+    """Scrape auction lots."""
+    lots = parse_lot_range(args.lots)
+    
+    pipeline.scrape(
+        site=args.site,
+        auction_id=args.auction_id,
+        lots=lots,
+        closing_date=args.date,
+        download_images=not args.no_images,
+    )
+
+
+def cmd_vision(args, pipeline: Pipeline):
+    """Process images through vision pipeline."""
+    pipeline.process_vision(batch_size=args.batch)
+
+
+def cmd_export(args, pipeline: Pipeline):
+    """Export ML-ready dataset."""
+    pipeline.export_ml_dataset(
+        min_likelihood=args.min_likelihood,
+        stratify_by=args.stratify,
+        generate_pytorch=args.pytorch,
+    )
+
+
+def cmd_run(args, pipeline: Pipeline):
+    """Run full pipeline."""
+    lots = parse_lot_range(args.lots)
+    
+    pipeline.run_full(
+        site=args.site,
+        auction_id=args.auction_id,
+        lots=lots,
+        closing_date=args.date,
+    )
+
+
+def cmd_stats(args, pipeline: Pipeline):
+    """Show catalog statistics."""
+    pipeline.print_stats()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Trivalaya Pipeline: Scraper → Vision → ML Dataset",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    
+    # Global options
+    parser.add_argument('--scraper-path', default='../trivalaya-data',
+                        help='Path to trivalaya-data repo')
+    parser.add_argument('--vision-path', default='../trivalaya-vision', 
+                        help='Path to trivalaya-vision repo')
+    parser.add_argument('--data-root', default='./trivalaya_data',
+                        help='Root directory for output data')
+    parser.add_argument('--mysql-host', default='127.0.0.1')
+    parser.add_argument('--mysql-user', default='auction_user')
+    parser.add_argument('--mysql-password', default=os.environ.get('MYSQL_PASSWORD', ''))
+    parser.add_argument('--mysql-database', default='auction_data')
+    
+    subparsers = parser.add_subparsers(dest='command', help='Command')
+    
+    # check
+    subparsers.add_parser('check', help='Validate setup')
+    
+    # scrape
+    scrape_parser = subparsers.add_parser('scrape', help='Scrape auction lots')
+    scrape_parser.add_argument('site', help='Site name (leu, gorny, nomos, cng)')
+    scrape_parser.add_argument('auction_id', help='Auction ID')
+    scrape_parser.add_argument('--lots', required=True, help='Lot range (e.g., "1-100")')
+    scrape_parser.add_argument('--date', help='Closing date')
+    scrape_parser.add_argument('--no-images', action='store_true')
+    
+    # vision
+    vision_parser = subparsers.add_parser('vision', help='Process through vision pipeline')
+    vision_parser.add_argument('--batch', type=int, default=100, help='Batch size')
+    
+    # export
+    export_parser = subparsers.add_parser('export', help='Export ML dataset')
+    export_parser.add_argument('--min-likelihood', type=float, default=0.5)
+    export_parser.add_argument('--stratify', default='period')
+    export_parser.add_argument('--pytorch', action='store_true', default=True)
+    
+    # run (full pipeline)
+    run_parser = subparsers.add_parser('run', help='Run full pipeline')
+    run_parser.add_argument('site', help='Site name')
+    run_parser.add_argument('auction_id', help='Auction ID')
+    run_parser.add_argument('--lots', required=True, help='Lot range')
+    run_parser.add_argument('--date', help='Closing date')
+    
+    # stats
+    subparsers.add_parser('stats', help='Show statistics')
+    
+    args = parser.parse_args()
+    
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+    
+    # Initialize pipeline
+    pipeline = Pipeline(
+        scraper_path=args.scraper_path,
+        vision_path=args.vision_path,
+        data_root=args.data_root,
+        mysql_host=args.mysql_host,
+        mysql_user=args.mysql_user,
+        mysql_password=args.mysql_password,
+        mysql_database=args.mysql_database,
+    )
+    
+    # Dispatch
+    commands = {
+        'check': cmd_check,
+        'scrape': cmd_scrape,
+        'vision': cmd_vision,
+        'export': cmd_export,
+        'run': cmd_run,
+        'stats': cmd_stats,
+    }
+    
+    result = commands[args.command](args, pipeline)
+    sys.exit(result or 0)
+
+
+if __name__ == '__main__':
+    main()
