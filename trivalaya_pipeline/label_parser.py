@@ -230,7 +230,7 @@ class LabelParser:
             r"\broman\s+provincial\b": "roman_provincial",
             r"\bbyzantin": "byzantine",
             r"\bgreek\b": "greek",
-            r"\bceltic\b": "celtic",
+            r"\bceltic\b|\bbritain\b|\bgaul\b": "celtic",
             r"\bislamic\b|\bumayyad\b|\babbasid\b": "islamic",
         }
         
