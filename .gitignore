@@ -3,3 +3,5 @@ leu_28/
 trivalaya_data/
 __pycache__/
 *.pyc
+*.pth
+trivalaya_data/
