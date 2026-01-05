@@ -1,4 +1,4 @@
-"""ML POC with proper balanced train/val"""
+"""ML POC with proper 80/20 split"""
 import json
 import random
 import torch
@@ -21,21 +21,21 @@ def load_all():
             all_data.extend([x for x in json.load(f) if x.get("period")])
     return all_data
 
-# Load all data and split ourselves
 all_data = load_all()
 by_period = defaultdict(list)
 for x in all_data:
     by_period[x["period"]].append(x)
 
-# Only keep periods with enough samples
 train_data, val_data = [], []
 periods = []
+MIN_SAMPLES = 20
+
 for period, items in sorted(by_period.items()):
-    if len(items) >= 20:  # Need at least 20 samples
+    if len(items) >= MIN_SAMPLES:
         random.shuffle(items)
-        n_val = max(5, len(items) // 5)  # 20% for val, min 5
+        n_val = max(5, len(items) // 5)
         val_data.extend(items[:n_val])
-        train_data.extend(items[n_val:n_val+60])  # Cap at 60 train
+        train_data.extend(items[n_val:])
         periods.append(period)
 
 period_to_idx = {p: i for i, p in enumerate(periods)}
@@ -44,7 +44,7 @@ print(f"Classes: {periods}")
 for p in periods:
     tc = sum(1 for x in train_data if x["period"] == p)
     vc = sum(1 for x in val_data if x["period"] == p)
-    print(f"  {p}: {tc} train, {vc} val")
+    print(f"  {p}: {tc} train, {vc} val ({tc/(tc+vc)*100:.0f}%/{vc/(tc+vc)*100:.0f}%)")
 print(f"Total: {len(train_data)} train, {len(val_data)} val")
 
 class CoinDataset(torch.utils.data.Dataset):
@@ -99,7 +99,6 @@ for epoch in range(EPOCHS):
     
     print(f"Epoch {epoch+1:2d} | Loss: {train_loss/len(train_loader):.3f} | Train: {train_correct/len(train_data)*100:.0f}% | Val: {val_acc:.0f}%")
 
-# Load best model for final eval
 model.load_state_dict(torch.load("best_model.pth", weights_only=True))
 model.eval()
 
