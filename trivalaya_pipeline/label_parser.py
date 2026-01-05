@@ -223,15 +223,194 @@ class LabelParser:
                 label.confidence['period'] = 0.85
                 return
         
-        # Period keywords
+        # Period keywords - expanded list
         period_keywords = {
+            # Roman
             r"\broman\s+imperial\b": "roman_imperial",
             r"\broman\s+republic": "roman_republican",
             r"\broman\s+provincial\b": "roman_provincial",
+            r"commemorative\s+series.*33[0-9]": "roman_imperial",
+            
+            # German language variants
+            r"r[oö]mische\s+republik": "roman_republican",
+            r"r[oö]mische\s+kaiserzeit": "roman_imperial",
+            r"anonyme\s+pr[aä]gungen": "roman_republican",
+            r"nach\s+211\s+v": "roman_republican",
+            r"\baes\s+grave\b": "roman_republican",
+            
+            # Byzantine - emperors and keywords
             r"\bbyzantin": "byzantine",
+            r"\bphocas\b": "byzantine",
+            r"\bheraclius\b": "byzantine",
+            r"\bjustinian\b": "byzantine",
+            r"\bjustin\s+i": "byzantine",
+            r"\bcomnenus\b": "byzantine",
+            r"\bcomnena\b": "byzantine",
+            r"\bpalaeolog": "byzantine",
+            r"\bangelus\b": "byzantine",
+            r"\bangelos\b": "byzantine",
+            r"\bducas\b": "byzantine",
+            r"\bvatatzes\b": "byzantine",
+            r"\bnicaea\b": "byzantine",
+            r"\bthessalonic": "byzantine",
+            r"\baelia\s+eudoxia": "byzantine",
+            r"constantine\s+(vi|vii|viii|ix|x|xi)\b": "byzantine",
+            r"michael\s+(i|ii|iii|iv|v|vi|vii|viii)\b": "byzantine",
+            r"\bandronicus\b": "byzantine",
+            r"\bmanuel\s+i\b": "byzantine",
+            r"\bisaac\s+(i|ii)\b": "byzantine",
+            r"john\s+(i|ii|iii|iv|v|vi)\b.*comnen": "byzantine",
+            r"\btheodore\b.*comnen": "byzantine",
+            r"constantine.*monomachus": "byzantine",
+            r"\bmonomachus\b": "byzantine",
+            
+            # Greek
             r"\bgreek\b": "greek",
-            r"\bceltic\b|\bbritain\b|\bgaul\b": "celtic",
-            r"\bislamic\b|\bumayyad\b|\babbasid\b": "islamic",
+            r"\bcalabria\b": "greek",
+            r"\bakarnania\b": "greek",
+            r"\blucania\b": "greek",
+            r"\bbruttium\b": "greek",
+            r"\bcampania\b": "greek",
+            r"\bsicily\b": "greek",
+            r"\bmagna\s+graecia\b": "greek",
+            r"\bapulia\b": "greek",
+            r"\btarentum\b": "greek",
+            r"\btaranto\b": "greek",
+            r"\bmetapontum\b": "greek",
+            r"\bthurium\b": "greek",
+            r"\bcroton\b": "greek",
+            r"\bvelia\b": "greek",
+            r"\bneapolis\b": "greek",
+            
+            # Celtic
+            r"\bceltic\b": "celtic",
+            r"\bbritain\b": "celtic",
+            r"\bgaul\b": "celtic",
+            r"\bgallia\b": "celtic",
+            r"\bboii\b": "celtic",
+            r"\bdanubian\b": "celtic",
+            
+            # Islamic
+            r"\bislamic\b": "islamic",
+            r"\bumayyad\b": "islamic",
+            r"\babbasid\b": "islamic",
+            r"\bfatimid\b": "islamic",
+            r"\bayyubid\b": "islamic",
+            r"\bmamluk\b": "islamic",
+            r"\bottoman\b": "islamic",
+            r"\bseljuk\b": "islamic",
+            r"\bseljuq\b": "islamic",
+            
+            # Medieval
+            r"\bserbia\b": "medieval",
+            r"\bserbian\b": "medieval",
+            r"\bstefan\s+uros": "medieval",
+            r"\bstefan\s+dragutin": "medieval",
+            r"\bstefan\s+lazar": "medieval",
+            r"\bdjuradj\b": "medieval",
+            r"\bbulgaria\b": "medieval",
+            r"\bbulgarian\b": "medieval",
+            r"\blow\s+countries\b": "medieval",
+            r"\bverenigd": "medieval",
+            r"\bgermany\b": "medieval",
+            r"\bk[oö]ln\b": "medieval",
+            r"\berzbistum\b": "medieval",
+            r"\bholy\s+roman\s+empire\b": "medieval",
+            
+            # More Greek regions
+            r"\bargolis\b": "greek",
+            r"\bargos\b": "greek",
+            r"\belis\b": "greek",
+            r"\bolympia\b": "greek",
+            r"\blesbos\b": "greek",
+            r"\bmytilene\b": "greek",
+            r"\blokris\b": "greek",
+            r"\bopuntii\b": "greek",
+            r"\barkadia\b": "greek",
+            r"\bmacedon\b": "greek",
+            r"\barrhidaios\b": "greek",
+            r"\bphilip\s*iii\b": "greek",
+            r"\bantiochia\b": "roman_provincial",
+            r"\borontes\b": "roman_provincial",
+            
+            # German emperor names
+            r"\bconstantin\s*[iv]+\b": "roman_imperial",
+            r"\bmacrinus\b": "roman_imperial",
+            r"\blucius\s*verus\b": "roman_imperial",
+            r"\bvitellius\b": "roman_imperial",
+            r"\btraianus\s*decius\b": "roman_imperial",
+            r"\bmaximianus\b": "roman_imperial",
+            r"\bconstans\s*ii\b": "byzantine",
+            r"\bzeno\b": "byzantine",
+            r"\bjulian\s*ii\b": "roman_imperial",
+            
+            # Crusaders
+            r"\bcrusader": "medieval",
+            
+            # Encoding variants for German
+            r"anonyme.*gungen": "roman_republican",
+
+            # More Greek regions
+            r"\bargolis\b": "greek",
+            r"\bargos\b": "greek",
+            r"\belis\b": "greek",
+            r"\bolympia\b": "greek",
+            r"\blesbos\b": "greek",
+            r"\bmytilene\b": "greek",
+            r"\blokris\b": "greek",
+            r"\barkadia\b": "greek",
+            r"\bmacedon\b": "greek",
+            r"\bphilip\s*iii\b": "greek",
+            r"\bantiochia\b": "roman_provincial",
+            
+            # German emperor names
+            r"\bconstantin\s*[iv]+\b": "roman_imperial",
+            r"\bmacrinus\b": "roman_imperial",
+            r"\blucius\s*verus\b": "roman_imperial",
+            r"\bvitellius\b": "roman_imperial",
+            r"\btraianus\s*decius\b": "roman_imperial",
+            r"\bmaximianus\b": "roman_imperial",
+            r"\bconstans\s*ii\b": "byzantine",
+            r"\bzeno\b": "byzantine",
+            r"\bjulian\s*ii\b": "roman_imperial",
+            
+            # More Byzantine emperors
+            r"\bnicephoros\b": "byzantine",
+            r"\bcopronymus\b": "byzantine",
+            r"\bbasil\s*i\b": "byzantine",
+            r"\btheodosius\s*ii\b": "byzantine",
+            
+            # German spellings
+            r"\belagabal\b": "roman_imperial",
+            r"\bconstans\s*i\b": "roman_imperial",
+            r"\biulia\s*domna\b": "roman_imperial",
+            
+            # More Greek/Hellenistic
+            r"\bseleukid\b": "greek",
+            r"\belymais\b": "greek",
+            r"\bpaphlagonia\b": "greek",
+            r"\btroas\b": "greek",
+            r"\bilion\b": "greek",
+            r"\bneandria\b": "greek",
+            r"\bcilicia\b": "greek",
+            r"\bantiochos\b": "greek",
+            
+            # Persian
+            r"\bachaemenid\b": "persian",
+            r"\bsasanian\b": "persian",
+            r"\bxerxes\b": "persian",
+            r"\bdarios\b": "persian",
+            r"\barsakid\b": "persian",
+            
+            # Islamic
+            r"\bqajars?\b": "islamic",
+            r"\biran\b": "islamic",
+            
+            # Medieval
+            r"\bswitzerland\b": "medieval",
+            r"\bz[uü]rich\b": "medieval",
+            
+            r"\bcrusader\b": "medieval",
         }
         
         for pattern, period in period_keywords.items():
