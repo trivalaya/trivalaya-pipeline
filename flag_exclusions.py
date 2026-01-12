@@ -18,7 +18,7 @@ import mysql.connector
 # Database configuration
 DB_HOST = os.getenv("TRIVALAYA_DB_HOST", "127.0.0.1")
 DB_USER = os.getenv("TRIVALAYA_DB_USER", "auction_user")
-DB_PASSWORD = os.getenv("TRIVALAYA_DB_PASSWORD", "")
+DB_PASSWORD = os.getenv("TRIVALAYA_DB_PASSWORD", "Veritas@2024")
 DB_NAME = os.getenv("TRIVALAYA_DB_NAME", "auction_data")
 
 # Patterns for group lots

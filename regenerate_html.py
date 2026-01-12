@@ -1,7 +1,6 @@
 import pandas as pd
 import os
 import argparse
-from pathlib import Path
 from collections import Counter
 
 def get_period_color(period):
@@ -14,7 +13,6 @@ def get_period_color(period):
 
 def resolve_image_path(path_str):
     # Quick fix to make sure local server can find the images
-    # We strip absolute paths to make them relative if they are inside the current dir
     cwd = os.getcwd()
     if path_str.startswith(cwd):
         return os.path.relpath(path_str, cwd)
@@ -26,27 +24,26 @@ def main():
     parser.add_argument('--output', default='cluster_output')
     args = parser.parse_args()
 
+    if not os.path.exists(args.csv):
+        print(f"❌ Error: Could not find CSV at {args.csv}")
+        return
+
     print(f"📊 Reading {args.csv}...")
     df = pd.read_csv(args.csv)
-    
-    # Ensure cluster_id is string to handle "5-0"
     df['cluster_id'] = df['cluster_id'].astype(str)
 
-    # 1. Aggregate Stats by Cluster
-    print("   Calculating cluster stats...")
+    # 1. Aggregate Stats
     clusters = []
-    
-    # Get unique cluster IDs (excluding noise if you want, but usually good to show)
     unique_ids = df['cluster_id'].unique()
     
     for c_id in unique_ids:
-        # Filter rows for this cluster
         c_df = df[df['cluster_id'] == c_id]
         
-        # Skip noise if desired, or handle differently
+        # Check for noise
         is_noise = (str(c_id) == '-1' or 'noise' in str(c_id))
+        cluster_name = f"Cluster {c_id}" if not is_noise else "Noise"
         
-        # Period stats
+        # Stats
         periods = c_df['parser_period'].fillna('unknown').tolist()
         period_counts = Counter(periods)
         dominant = period_counts.most_common(1)[0] if period_counts else ('unknown', 0)
@@ -54,44 +51,84 @@ def main():
         
         clusters.append({
             'id': c_id,
-            'name': f"Cluster {c_id}" if not is_noise else "Noise",
+            'name': cluster_name,
             'size': len(c_df),
             'dominant': dominant[0],
             'purity': purity,
             'breakdown': period_counts,
-            'images': c_df.sample(min(20, len(c_df))) # Pick 20 random sample images
+            'images': c_df.sample(min(20, len(c_df)))
         })
 
-    # Sort: Largest clusters first
+    # Sort: Largest first
     clusters.sort(key=lambda x: x['size'], reverse=True)
 
-    # 2. Build HTML
-    print("   Building HTML...")
+    # 2. Print Console Summary
+    print("\n" + "="*60)
+    print(f"{'ID':<12} | {'Count':<8} | {'Dominant Period':<20} | {'Purity':<6}")
+    print("-" * 60)
+    for c in clusters:
+        print(f"{c['id']:<12} | {c['size']:<8} | {c['dominant']:<20} | {c['purity']*100:.0f}%")
+    print("="*60 + "\n")
+
+    # 3. Build HTML
+    print("   Building HTML Dashboard...")
     
-    # --- HTML Header ---
     html_parts = ["""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Trivalaya Updated Clusters</title>
+    <title>Trivalaya Clusters</title>
     <style>
-        body { font-family: sans-serif; background: #1a1a2e; color: #eee; padding: 20px; }
-        .cluster { background: #16213e; margin-bottom: 30px; padding: 15px; border-radius: 8px; }
-        .cluster h2 { color: #ffd700; border-bottom: 1px solid #333; padding-bottom: 10px; }
-        .purity { color: #4ade80; font-size: 0.9em; margin-bottom: 10px; }
-        .bar { height: 6px; display: flex; border-radius: 3px; overflow: hidden; margin-bottom: 15px; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 10px; }
-        .card { position: relative; aspect-ratio: 1; overflow: hidden; border-radius: 4px; background: #000; }
-        .card img { width: 100%; height: 100%; object-fit: cover; transition: transform 0.2s; }
-        .card:hover img { transform: scale(1.1); }
-        .label { position: absolute; bottom: 0; background: rgba(0,0,0,0.7); width: 100%; font-size: 0.7em; text-align: center; padding: 2px; }
+        body { font-family: 'Segoe UI', sans-serif; background: #0f172a; color: #cbd5e1; padding: 20px; margin: 0; }
+        a { color: inherit; text-decoration: none; }
+        
+        /* Summary Dashboard */
+        .dashboard { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; margin-bottom: 40px; }
+        .stat-card { background: #1e293b; padding: 10px; border-radius: 6px; border-left: 4px solid #3b82f6; transition: transform 0.1s; }
+        .stat-card:hover { transform: translateY(-2px); background: #334155; }
+        .stat-card h3 { margin: 0; font-size: 1.1em; color: #fff; }
+        .stat-card .count { font-size: 1.5em; font-weight: bold; color: #60a5fa; }
+        .stat-card .meta { font-size: 0.8em; color: #94a3b8; }
+        
+        /* Cluster Sections */
+        .cluster { background: #1e293b; margin-bottom: 30px; padding: 20px; border-radius: 12px; }
+        .cluster-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; padding-bottom: 10px; margin-bottom: 15px; }
+        .cluster h2 { margin: 0; color: #facc15; }
+        
+        /* Images */
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 8px; }
+        .card { aspect-ratio: 1; overflow: hidden; border-radius: 4px; background: #000; position: relative; }
+        .card img { width: 100%; height: 100%; object-fit: cover; transition: opacity 0.2s; }
+        .card:hover img { opacity: 0.8; }
+        .label { position: absolute; bottom: 0; width: 100%; background: rgba(0,0,0,0.7); font-size: 10px; text-align: center; padding: 2px 0; }
+        
+        /* Bars */
+        .bar-container { height: 8px; display: flex; border-radius: 4px; overflow: hidden; margin-bottom: 15px; background: #334155; }
     </style>
 </head>
 <body>
-    <h1>Updated Visual Clusters</h1>
+    <h1>Visual Cluster Dashboard</h1>
+    <p style="color:#94a3b8">Total Clusters: """ + str(len(clusters)) + """</p>
+    
+    <div class="dashboard">
 """]
 
-    # --- Cluster Blocks ---
+    # Add Summary Cards
+    for c in clusters:
+        html_parts.append(f"""
+        <a href="#cluster-{c['id']}" class="stat-card">
+            <h3>{c['name']}</h3>
+            <div class="count">{c['size']}</div>
+            <div class="meta">{c['dominant']} ({c['purity']*100:.0f}%)</div>
+        </a>
+        """)
+
+    html_parts.append("""</div>
+    
+    <div id="main-content">
+    """)
+
+    # Add Full Cluster Views
     for c in clusters:
         # Period Bar
         bar_html = ""
@@ -105,28 +142,29 @@ def main():
         for _, row in c['images'].iterrows():
             img_path = resolve_image_path(row['image_path'])
             img_html += f"""
-                <div class="card">
+                <div class="card" title="{row['parser_period']}">
                     <img src="{img_path}" loading="lazy">
                     <div class="label">{row['parser_period']}</div>
                 </div>"""
 
         html_parts.append(f"""
         <div class="cluster" id="cluster-{c['id']}">
-            <h2>{c['name']} <span style="font-size:0.6em; color:#888">({c['size']} coins)</span></h2>
-            <div class="purity">Dominant: {c['dominant']} ({c['purity']*100:.0f}%)</div>
-            <div class="bar">{bar_html}</div>
+            <div class="cluster-header">
+                <h2>{c['name']}</h2>
+                <span style="color:#94a3b8">{c['size']} coins</span>
+            </div>
+            <div class="bar-container">{bar_html}</div>
             <div class="grid">{img_html}</div>
         </div>
         """)
 
-    html_parts.append("</body></html>")
+    html_parts.append("</div></body></html>")
 
-    # 3. Write File
     out_path = os.path.join(args.output, 'cluster_visualization.html')
     with open(out_path, 'w') as f:
         f.write("\n".join(html_parts))
     
-    print(f"✅ Visualization updated: {out_path}")
+    print(f"✅ Dashboard generated: {out_path}")
 
 if __name__ == "__main__":
     main()

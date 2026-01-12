@@ -65,12 +65,13 @@ def load_dataset_from_db(sample_size=None):
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
     
+    # UPDATED QUERY: Added 'AND m.is_active = 1'
     query = """
-        SELECT m.id, m.image_path, m.period, m.label_confidence, m.raw_label,
-               c.coin_likelihood, c.edge_support
+        SELECT m.id, m.image_path, m.period, m.label_confidence, m.raw_label
         FROM ml_dataset m
-        LEFT JOIN coin_detections c ON m.coin_detection_id = c.id
-        WHERE m.image_path IS NOT NULL AND m.image_path != ''
+        WHERE m.image_path IS NOT NULL 
+        AND m.image_path != ''
+        AND m.is_active = 1  -- <--- CRITICAL FILTER
     """
     
     if sample_size:
@@ -82,7 +83,7 @@ def load_dataset_from_db(sample_size=None):
     cursor.close()
     conn.close()
     
-    print(f"  Loaded {len(records)} records")
+    print(f"  Loaded {len(records)} active records")
     return records
 def load_dataset_from_directory(directory, sample_size=None):
     """Load images directly from a folder (for re-clustering subsets)."""
