@@ -512,7 +512,10 @@ class CatalogDB:
                     label_confidence, needs_review
                 FROM ml_dataset
                 WHERE split = %s
-                AND (is_verified = 1 OR needs_review = 0)
+                AND period IS NOT NULL
+                AND label_confidence >= 0.6  # Only include reasonable confidence
+                -- If you want to prioritize verified:
+                -- ORDER BY is_verified DESC, label_confidence DESC
             """, (split,))
             
             return cursor.fetchall()

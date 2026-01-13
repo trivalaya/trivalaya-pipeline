@@ -70,14 +70,6 @@ class MLExporter:
     ) -> ExportStats:
         """
         Export full dataset with train/val/test splits.
-        
-        Args:
-            min_likelihood: Minimum coin_likelihood (default from config)
-            stratify_by: Field to stratify splits by
-            seed: Random seed
-            
-        Returns:
-            ExportStats with export statistics
         """
         random.seed(seed)
         min_likelihood = min_likelihood or self.config.min_coin_likelihood
@@ -169,6 +161,7 @@ class MLExporter:
         """Split data with stratification."""
         groups = defaultdict(list)
         for entry in entries:
+            # Safely get attribute, default to 'unknown'
             key = getattr(entry['label'], stratify_by, '') or 'unknown'
             groups[key].append(entry)
         
@@ -224,9 +217,12 @@ class MLExporter:
             if label.material:
                 stats.materials[label.material] = stats.materials.get(label.material, 0) + 1
             
+            # FIXED: Updated attribute names to match LabelParser
             if label.needs_review:
                 stats.needs_review += 1
-            if label.overall_confidence > 0.7:
+            
+            # FIXED: Use 'confidence' instead of 'overall_confidence'
+            if label.confidence > 0.7:
                 stats.high_confidence += 1
             
             # Save to database
@@ -236,13 +232,15 @@ class MLExporter:
                 image_hash=entry['image_hash'],
                 split=split_name,
                 period=label.period,
-                subperiod=label.subperiod,
-                authority=label.authority,
+                # FIXED: Use getattr for optional fields not yet in parser
+                subperiod=getattr(label, 'subperiod', None),
+                authority=getattr(label, 'authority', None),
                 denomination=label.denomination,
                 mint=label.mint,
                 material=label.material,
-                raw_label=label.raw_label,
-                label_confidence=label.overall_confidence,
+                # FIXED: Map original_text to raw_label
+                raw_label=label.original_text, 
+                label_confidence=label.confidence,
                 needs_review=label.needs_review,
             )
             self.db.insert_ml_entry(ml_entry)
