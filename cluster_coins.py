@@ -299,30 +299,59 @@ def load_precomputed_features(records, embeddings_path, meta_path):
 # CLUSTERING
 # =============================================================================
 
-def cluster_features(features, min_cluster_size=20, min_samples=10):
-    """Cluster features using UMAP + HDBSCAN."""
+def cluster_features(features, min_cluster_size=20, min_samples=10, skip_umap=False, pca_dims=None):
+    """Cluster features using HDBSCAN, optionally on raw embeddings or PCA/UMAP reduced."""
     print(f"\n🎯 Clustering {len(features)} feature vectors...")
     import umap
     import hdbscan
-    
-    print("  Running UMAP...")
-    reducer = umap.UMAP(n_components=15, n_neighbors=30, min_dist=0.0, metric='cosine', random_state=42)
-    embedding = reducer.fit_transform(features)
-    
-    print("  Creating 2D projection...")
-    reducer_2d = umap.UMAP(n_components=2, n_neighbors=30, min_dist=0.1, metric='cosine', random_state=42)
-    embedding_2d = reducer_2d.fit_transform(features)
-    
-    print(f"  Running HDBSCAN (min_cluster={min_cluster_size})...")
-    clusterer = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, min_samples=min_samples, metric='euclidean', cluster_selection_method='eom',prediction_data=True)
-    cluster_labels = clusterer.fit_predict(embedding)
-    
-    soft_clusters = hdbscan.membership_vector(clusterer, embedding)
-    confidences = np.max(soft_clusters, axis=1) if len(soft_clusters.shape) > 1 else np.ones(len(cluster_labels))
-    
+
+    # --- Choose clustering space ---
+    if pca_dims:
+        from sklearn.decomposition import PCA
+        print(f"  Running PCA ({features.shape[1]}-d → {pca_dims}-d) for clustering...")
+        pca = PCA(n_components=pca_dims, random_state=42)
+        clustering_space = pca.fit_transform(features).astype(np.float32)
+        print(f"  PCA explained variance: {float(pca.explained_variance_ratio_.sum())*100:.1f}%")
+    elif skip_umap:
+        print(f"  Clustering on raw {features.shape[1]}-d embeddings (skip-umap mode)...")
+        clustering_space = features.astype(np.float32)
+    else:
+        print("  Running UMAP (15-d for clustering)...")
+        reducer = umap.UMAP(
+            n_components=15, n_neighbors=30, min_dist=0.0,
+            metric='cosine', random_state=42
+        )
+        clustering_space = reducer.fit_transform(features).astype(np.float32)
+
+    # --- 2D projection for visualization ---
+    print("  Creating 2D projection for visualization...")
+    reducer_2d = umap.UMAP(
+        n_components=2,
+        n_neighbors=30,   # 100 looks nicer but slower; 30 is good default
+        min_dist=0.1,
+        metric='cosine',
+        random_state=42
+    )
+    embedding_2d = reducer_2d.fit_transform(features).astype(np.float32)
+
+    # --- HDBSCAN ---
+    print(f"  Running HDBSCAN (min_cluster={min_cluster_size}, min_samples={min_samples})...")
+    clusterer = hdbscan.HDBSCAN(
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples,
+        metric='euclidean',
+        cluster_selection_method='eom',
+        core_dist_n_jobs=-1  # use all CPU cores
+    )
+    cluster_labels = clusterer.fit_predict(clustering_space)
+
+    # Cheap per-point confidence (avoid expensive membership_vector call)
+    confidences = getattr(clusterer, "probabilities_", np.ones(len(cluster_labels), dtype=np.float32))
+
     n_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)
-    print(f"  Found {n_clusters} clusters")
-    
+    n_noise = int(np.sum(cluster_labels == -1))
+    print(f"  Found {n_clusters} clusters, {n_noise} noise points ({100*n_noise/len(cluster_labels):.1f}%)")
+
     return cluster_labels, confidences, embedding_2d
 
 def analyze_clusters(records, cluster_labels, confidences):
@@ -431,11 +460,14 @@ def generate_html_visualization(df, records, cluster_labels, summary, output_dir
         for record, _ in sample:
             path = resolve_image_path(record['image_path'])
             if path:
-                # Use relative path for HTML portability
+                # Force absolute resolution before computing relpath
+                # This prevents broken links like cluster_output/trivalaya_data/...
                 try:
-                    rel_path = os.path.relpath(path, output_dir)
+                    abs_path = Path(path).resolve()
+                    abs_output = Path(output_dir).resolve()
+                    rel_path = os.path.relpath(abs_path, abs_output)
                 except ValueError:
-                    rel_path = str(path) # Fallback if on different drive
+                    rel_path = str(Path(path).resolve())  # Fallback if on different drive
                 
                 images_html.append(f'''
                     <div class="coin-card">
@@ -498,7 +530,7 @@ def drill_down_cluster(target_cluster_id, features, df, output_dir):
 
     import umap
     print("   Re-calculating UMAP (local)...")
-    reducer = umap.UMAP(n_components=5, n_neighbors=10, min_dist=0.0, metric='cosine', random_state=42)
+    reducer = umap.UMAP(n_components=5, n_neighbors=100, min_dist=0.2, metric='cosine', random_state=42)
     sub_embedding = reducer.fit_transform(sub_features)
 
     import hdbscan
@@ -533,6 +565,8 @@ def main():
     # NEW: Precomputed embeddings support (v5.2)
     parser.add_argument('--embeddings', type=str, help="Path to .npy embeddings to use instead of CLIP")
     parser.add_argument('--embeddings-meta', type=str, help="Path to embeddings meta.json (paths/labels)")
+    parser.add_argument('--skip-umap', action='store_true', help="Cluster on raw embeddings (1280-d) instead of UMAP projection")
+    parser.add_argument('--pca', type=int, metavar='DIMS', help="Reduce to N dims via PCA before clustering (e.g., --pca 50)")
     
     args = parser.parse_args()
     
@@ -577,6 +611,14 @@ def main():
             args.embeddings,
             args.embeddings_meta
         )
+        # If using precomputed embeddings, default to clustering in original space
+        # (UMAP is great for visualization, but often increases "noise" for HDBSCAN)
+        # PCA takes precedence if specified
+        if args.pca:
+            print(f"  ℹ️  Using PCA reduction to {args.pca} dims for clustering.")
+        ##elif not args.skip_umap:
+        ##    print("  ℹ️  Defaulting to --skip-umap because --embeddings is in use.")
+        ##    args.skip_umap = True
     else:
         model, preprocess, device, model_type = load_clip_model(use_gpu=args.gpu)
         features, valid_records = extract_features(records, model, preprocess, device, model_type)
@@ -585,7 +627,10 @@ def main():
         print("❌ Too few valid images")
         return
     
-    cluster_labels, confidences, embedding_2d = cluster_features(features, args.min_cluster, args.min_samples)
+    cluster_labels, confidences, embedding_2d = cluster_features(
+        features, args.min_cluster, args.min_samples, 
+        skip_umap=args.skip_umap, pca_dims=args.pca
+    )
     _, summary = analyze_clusters(valid_records, cluster_labels, confidences)
     
     suggestions = suggest_cluster_names(summary)
