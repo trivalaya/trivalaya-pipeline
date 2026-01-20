@@ -112,9 +112,11 @@ class MLExporter:
                 'image_path': normalized_path,
                 'image_hash': img_hash,
                 'label': label,
-                'site': det.get('site', ''),
-                'auction_id': det.get('auction_id', ''),
+                'site': det.get('site') or 'unknown',
+                'auction_house': det.get('auction_house') or 'unknown',
+                'sale_id': det.get('sale_id') or 'unknown',
                 'lot_number': det.get('lot_number', 0),
+                'period': det.get('period'),  # From auction_info via lot range
             })
         
         if not entries:
@@ -200,12 +202,12 @@ class MLExporter:
             
             label = entry['label']
             
-            # Organize by period
-            period_dir = output_dir / (label.period or 'unknown')
-            period_dir.mkdir(exist_ok=True)
-            
+            # Use period from auction_info, fall back to parser, then 'unknown'
+            period = entry.get('period') or label.period or 'unknown'
+            period_dir = output_dir / period
+            period_dir.mkdir(parents=True, exist_ok=True)
             # Copy image
-            dst_name = f"{entry['site']}_{entry['auction_id']}_{entry['lot_number']:05d}.jpg"
+            dst_name = f"{entry['auction_house']}_{entry['sale_id']}_{entry['lot_number']:05d}.jpg"
             dst_path = period_dir / dst_name
             shutil.copy2(src_path, dst_path)
             

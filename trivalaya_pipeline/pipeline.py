@@ -240,8 +240,8 @@ class Pipeline:
                 continue
             
             # Extract coins
-            base_name = f"{record.site or 'lot'}_{record.auction_id or '0'}_{record.lot_number:05d}"
-            output_dir = self.paths.extracted_coins / (record.site or 'unknown') / (record.auction_id or '0')
+            base_name = f"{record.auction_house or 'lot'}_{record.sale_id or '0'}_{record.lot_number:05d}"
+            output_dir = self.paths.extracted_coins / (record.auction_house or 'unknown') / (record.sale_id or '0')
             
             extractions = self.vision.extract_coins(
                 image_path,
