@@ -446,16 +446,40 @@ def generate_html_visualization(df, records, cluster_labels, summary, output_dir
     """Generate HTML grid with relative paths."""
     output_dir = Path(output_dir)
     print("  Generating HTML visualization...")
-    
+
+    # Read assignment_method (and possibly updated cluster_id) from CSV if present
+    assignment_map = {}
+    clusterid_map = {}
+    if df is None:
+        csv_path = output_dir / "cluster_results.csv"
+        if csv_path.exists():
+            try:
+                df = pd.read_csv(csv_path)
+            except Exception:
+                df = None
+    if df is not None and 'assignment_method' in df.columns:
+        try:
+            for _, row in df[['id', 'assignment_method', 'cluster_id']].iterrows():
+                assignment_map[int(row['id'])] = str(row['assignment_method'])
+                clusterid_map[int(row['id'])] = int(row['cluster_id'])
+        except Exception:
+            assignment_map = {}
+            clusterid_map = {}
+
     clusters_html = []
     for info in summary:
         cluster_id = info['cluster_id']
-        cluster_items = [(r, i) for i, (r, cl) in enumerate(zip(records, cluster_labels)) if cl == cluster_id]
-        
+        cluster_items = []
+        for i, (r, cl) in enumerate(zip(records, cluster_labels)):
+            coin_id = int(r['id'])
+            effective_cluster_id = clusterid_map.get(coin_id, cl)
+            if effective_cluster_id == cluster_id:
+                cluster_items.append((r, i))
+
         # Sample 20 images
         import random
         sample = random.sample(cluster_items, min(20, len(cluster_items)))
-        
+
         images_html = []
         for record, _ in sample:
             path = resolve_image_path(record['image_path'])
@@ -468,14 +492,19 @@ def generate_html_visualization(df, records, cluster_labels, summary, output_dir
                     rel_path = os.path.relpath(abs_path, abs_output)
                 except ValueError:
                     rel_path = str(Path(path).resolve())  # Fallback if on different drive
-                
+
+                coin_id = int(record['id'])
+                method = assignment_map.get(coin_id)
+                if method is None:
+                    method = "clustered" if cluster_id >= 0 else "noise"
+
                 images_html.append(f'''
-                    <div class="coin-card">
+                    <div class="coin-card {method}">
                         <img src="{rel_path}" alt="coin" loading="lazy">
                         <div class="coin-info"><span class="period">{record['period']}</span></div>
                     </div>
                 ''')
-        
+
         clusters_html.append(f'''
         <div class="cluster" id="cluster-{cluster_id}">
             <div class="cluster-header">
@@ -485,7 +514,7 @@ def generate_html_visualization(df, records, cluster_labels, summary, output_dir
             <div class="coin-grid">{''.join(images_html)}</div>
         </div>
         ''')
-    
+
     html = f'''<!DOCTYPE html>
 <html>
 <head>
@@ -495,15 +524,28 @@ def generate_html_visualization(df, records, cluster_labels, summary, output_dir
         .cluster-header {{ padding: 15px; border-bottom: 1px solid #333; }}
         .coin-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 10px; padding: 15px; }}
         .coin-card img {{ width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 4px; }}
+        .coin-card.knn_assigned {{
+            border: 2px dashed #ffa500;  /* orange dashed border */
+        }}
+        .coin-card.clustered {{
+            border: 2px solid transparent;
+        }}
+        .coin-card.noise {{
+            border: 2px solid #ff4444;  /* red border for remaining noise */
+        }}
         h2 {{ color: #ffd700; margin: 0; }}
     </style>
 </head>
 <body>
     <h1>🪙 Trivalaya Visual Clusters</h1>
+    <div class="legend">
+        <span class="legend-item"><span class="swatch clustered"></span> Clustered</span>
+        <span class="legend-item"><span class="swatch knn"></span> KNN Assigned</span>
+    </div>
     {''.join(clusters_html)}
 </body>
 </html>'''
-    
+
     with open(output_dir / "cluster_visualization.html", 'w') as f:
         f.write(html)
     print(f"  ✓ cluster_visualization.html")
