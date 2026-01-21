@@ -5,3 +5,10 @@ __pycache__/
 *.pyc
 *.pth
 trivalaya_data/
+.env
+cluster_coins016.py
+cluster_output/
+cluster_output_full_pca/
+cng_*
+gorny_*
+leu_* 

@@ -361,7 +361,66 @@ with open(META_PATH, "w") as f:
 
 print(f"\n💾 Model saved to {MODEL_PATH}")
 print(f"💾 Metadata saved to {META_PATH}")
+# ... [After Step 8: Save Metadata & Logs] ...
 
+# 8.5. Detailed Evaluation (Confusion Matrix)
+print("\n🔍 Generating Confusion Matrix on Validation Set...")
+
+# Ensure we have the best model loaded
+state = torch.load(MODEL_PATH, map_location=DEVICE)
+model.load_state_dict(state)
+model.eval()
+
+all_preds = []
+all_targets = []
+
+with torch.no_grad():
+    for batch in val_loader:
+        imgs, labels, _ = batch
+        if imgs.numel() == 0:
+            continue
+            
+        imgs = imgs.to(DEVICE, non_blocking=True)
+        # Get predictions
+        outputs = model(imgs)
+        preds = outputs.argmax(dim=1).cpu().numpy()
+        
+        all_preds.extend(preds)
+        all_targets.extend(labels.numpy())
+
+# Calculate metrics
+try:
+    from sklearn.metrics import confusion_matrix, classification_report
+    
+    # 1. Print Console Report
+    print("\n" + "="*30)
+    print("CLASSIFICATION REPORT")
+    print("="*30)
+    report = classification_report(all_targets, all_preds, target_names=periods)
+    print(report)
+
+    # 2. Save Matrix to File (Raw Text)
+    cm = confusion_matrix(all_targets, all_preds)
+    matrix_save_path = "trivalaya_confusion_matrix.txt"
+    
+    with open(matrix_save_path, "w") as f:
+        f.write("Classification Report:\n")
+        f.write(report)
+        f.write("\n\nConfusion Matrix (Rows=True, Cols=Pred):\n")
+        # Helper to format the matrix with labels
+        f.write(f"{'':<20} " + " ".join([f"{p[:4]:>6}" for p in periods]) + "\n")
+        for i, row in enumerate(cm):
+            f.write(f"{periods[i]:<20} " + " ".join([f"{x:>6}" for x in row]) + "\n")
+            
+    print(f"✅ Confusion matrix saved to {matrix_save_path}")
+
+except ImportError:
+    print("⚠️  sklearn not found. Skipping detailed confusion matrix.")
+    # Fallback: Simple Accuracy Per Class
+    correct = np.array(all_preds) == np.array(all_targets)
+    print(f"Global Validation Accuracy: {correct.mean():.2%}")
+
+# ... [Proceed to Step 9: Generate Embeddings] ...
 
 # 9. Generate GLOBAL Embeddings (Manifest-Aligned)
 print("\n🧬 Generating Global Embeddings (L2 Normalized, Manifest-Aligned)...")
