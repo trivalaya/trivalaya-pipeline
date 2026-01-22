@@ -14,4 +14,5 @@ gorny_*
 leu_* 
 nomos*
 obolo*
+trivalaya_pipeline/__pycache__/*.pyc
 
