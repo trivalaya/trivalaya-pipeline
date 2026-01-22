@@ -114,7 +114,7 @@ class MLConfig:
     
     # Deduplication
     enable_dedup: bool = True
-    hash_algorithm: str = "phash"
+    hash_algorithm: str = "md5"
     
     # Label fields to extract
     classification_fields: List[str] = field(default_factory=lambda: [

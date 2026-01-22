@@ -38,9 +38,10 @@ class AuctionRecord:
     
     # Extended fields (added by pipeline)
     site: str = ""
-    auction_id: str = ""
+    sale_id: str = ""
+    auction_house: str = ""
+    sale_id: str = ""
     vision_processed: bool = False
-
 
 @dataclass
 class CoinDetection:
@@ -148,7 +149,7 @@ class CatalogDB:
             # (safe ALTER - ignores if column exists)
             alter_statements = [
                 "ALTER TABLE auction_data ADD COLUMN site VARCHAR(50) DEFAULT ''",
-                "ALTER TABLE auction_data ADD COLUMN auction_id VARCHAR(50) DEFAULT ''",
+                "ALTER TABLE auction_data ADD COLUMN sale_id VARCHAR(50) DEFAULT ''",
                 "ALTER TABLE auction_data ADD COLUMN vision_processed TINYINT DEFAULT 0",
             ]
             
@@ -296,15 +297,15 @@ class CatalogDB:
             cursor.close()
             conn.close()
     
-    def update_record_metadata(self, record_id: int, site: str, auction_id: str):
+    def update_record_metadata(self, record_id: int, site: str, sale_id: str):
         """Update site/auction metadata on existing record."""
         conn = self._get_connection()
         cursor = conn.cursor()
         
         try:
             cursor.execute(
-                "UPDATE auction_data SET site = %s, auction_id = %s WHERE id = %s",
-                (site, auction_id, record_id)
+                "UPDATE auction_data SET site = %s, sale_id = %s WHERE id = %s",
+                (site, sale_id, record_id)
             )
             conn.commit()
         finally:
@@ -323,7 +324,8 @@ class CatalogDB:
             closing_date=row.get('closing_date', ''),
             timestamp=str(row.get('timestamp', '')),
             site=row.get('site', ''),
-            auction_id=row.get('auction_id', ''),
+            auction_house=row.get('auction_house', ''),
+            sale_id=row.get('sale_id', ''),
             vision_processed=bool(row.get('vision_processed', 0)),
         )
     
@@ -385,19 +387,25 @@ class CatalogDB:
         
         try:
             cursor.execute("""
-                SELECT 
-                    d.*,
-                    a.title,
-                    a.description,
-                    a.site,
-                    a.auction_id,
-                    a.lot_number
-                FROM coin_detections d
-                JOIN auction_data a ON d.auction_record_id = a.id
-                WHERE d.coin_likelihood >= %s
-                AND d.normalized_path IS NOT NULL
-                AND d.id NOT IN (SELECT coin_detection_id FROM ml_dataset)
-            """, (min_likelihood,))
+                        SELECT 
+                            d.*,
+                            a.title,
+                            a.description,
+                            a.site,
+                            a.auction_house,
+                            a.sale_id,
+                            a.lot_number,
+                            ai.period
+                        FROM coin_detections d
+                        JOIN auction_data a ON d.auction_record_id = a.id
+                        LEFT JOIN auction_info ai 
+                            ON a.auction_house = ai.auction_house 
+                            AND a.sale_id = ai.sale_id
+                            AND a.lot_number BETWEEN ai.lot_start AND ai.lot_end
+                        WHERE d.coin_likelihood >= %s
+                            AND d.normalized_path IS NOT NULL
+                            AND d.id NOT IN (SELECT coin_detection_id FROM ml_dataset)
+                    """, (min_likelihood,))
             
             return cursor.fetchall()
             
@@ -547,7 +555,8 @@ def compute_image_hash(image_path: str, algorithm: str = "phash") -> str:
             hash_str = ''.join(['1' if b else '0' for b in hash_bits])
             return hex(int(hash_str, 2))[2:].zfill(16)
         else:
-            return hashlib.md5(img.tobytes()).hexdigest()
+            with open(image_path, 'rb') as f:
+                return hashlib.md5(f.read()).hexdigest()
             
     except Exception:
         with open(image_path, 'rb') as f:

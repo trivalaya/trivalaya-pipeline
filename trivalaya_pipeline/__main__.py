@@ -64,7 +64,7 @@ def cmd_scrape(args, pipeline: Pipeline):
     
     pipeline.scrape(
         site=args.site,
-        auction_id=args.auction_id,
+        sale_id=args.sale_id,
         lots=lots,
         closing_date=args.date,
         download_images=not args.no_images,
@@ -91,7 +91,7 @@ def cmd_run(args, pipeline: Pipeline):
     
     pipeline.run_full(
         site=args.site,
-        auction_id=args.auction_id,
+        sale_id=args.sale_id,
         lots=lots,
         closing_date=args.date,
     )
@@ -128,7 +128,7 @@ def main():
     # scrape
     scrape_parser = subparsers.add_parser('scrape', help='Scrape auction lots')
     scrape_parser.add_argument('site', help='Site name (leu, gorny, nomos, cng)')
-    scrape_parser.add_argument('auction_id', help='Auction ID')
+    scrape_parser.add_argument('sale_id', help='Auction ID')
     scrape_parser.add_argument('--lots', required=True, help='Lot range (e.g., "1-100")')
     scrape_parser.add_argument('--date', help='Closing date')
     scrape_parser.add_argument('--no-images', action='store_true')
@@ -146,7 +146,7 @@ def main():
     # run (full pipeline)
     run_parser = subparsers.add_parser('run', help='Run full pipeline')
     run_parser.add_argument('site', help='Site name')
-    run_parser.add_argument('auction_id', help='Auction ID')
+    run_parser.add_argument('sale_id', help='Auction ID')
     run_parser.add_argument('--lots', required=True, help='Lot range')
     run_parser.add_argument('--date', help='Closing date')
     

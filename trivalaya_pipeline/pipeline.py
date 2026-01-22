@@ -32,7 +32,7 @@ class Pipeline:
         )
         
         # Run full pipeline
-        pipeline.run_full(site='leu', auction_id='31', lots=range(1, 100))
+        pipeline.run_full(site='leu', sale_id='31', lots=range(1, 100))
         
         # Or run steps individually
         pipeline.process_vision(batch_size=100)
@@ -142,52 +142,39 @@ class Pipeline:
     # SCRAPING (uses your existing trivalaya-data)
     # =========================================================================
     
-    def scrape(
-        self,
-        site: str,
-        auction_id: str,
-        lots: range,
-        closing_date: str = None,
-        download_images: bool = True
-    ) -> Dict[str, int]:
-        """
-        Scrape an auction using your existing scraper.
-        
-        This calls into trivalaya-data's scraper module.
-        """
-        if not self.scraper:
-            raise RuntimeError("Scraper module not loaded. Check scraper_path.")
-        
-        print(f"\n{'='*60}")
-        print(f"SCRAPING: {site} auction {auction_id}, lots {lots.start}-{lots.stop-1}")
-        print(f"{'='*60}")
-        
-        # Create database handler with your existing class
-        db_handler = self.scraper['DatabaseHandler'](
-            host=self.mysql_config.host,
-            user=self.mysql_config.user,
-            password=self.mysql_config.password,
-            database=self.mysql_config.database,
-        )
-        
-        # Run your existing scraper
-        self.scraper['scrape_site'](
-            site_name=site,
-            lot_range=lots,
-            auction_id=auction_id,
-            closing_date=closing_date,
-            db_handler=db_handler,
-            download_images=download_images,
-            site_configs=self.scraper['SITE_CONFIGS'],
-        )
-        
-        # Update site/auction metadata on scraped records
-        # (Your scraper doesn't store these, so we add them)
-        self._update_scraped_metadata(site, auction_id, lots)
-        
-        return {'lots': len(lots)}
+    def scrape(self,site: str,sale_id: str,lots: range,closing_date: str = None,download_images: bool = True) -> Dict[str, int]:
+                if not self.scraper:
+                    raise RuntimeError("Scraper module not loaded. Check scraper_path.")
+
+                print(f"\n{'='*60}")
+                print(f"SCRAPING: {site} sale {sale_id}, lots {lots.start}-{lots.stop-1}")
+                print(f"{'='*60}")
+
+                db_handler = self.scraper['DatabaseHandler'](
+                    host=self.mysql_config.host,
+                    user=self.mysql_config.user,
+                    password=self.mysql_config.password,
+                    database=self.mysql_config.database,
+                )
+
+                # NOTE: this assumes you refactored the scraper to accept sale_id
+                self.scraper['scrape_site'](
+                    site_name=site,
+                    lot_range=lots,
+                    sale_id=sale_id,
+                    closing_date=closing_date,
+                    db_handler=db_handler,
+                    download_images=download_images,
+                    site_configs=self.scraper['SITE_CONFIGS'],
+                )
+                    
+                # Update site/auction metadata on scraped records
+                # (Your scraper doesn't store these, so we add them)
+                self._update_scraped_metadata(site, sale_id, lots)
+                
+                return {'lots': len(lots)}
     
-    def _update_scraped_metadata(self, site: str, auction_id: str, lots: range):
+    def _update_scraped_metadata(self, site: str, sale_id: str, lots: range):
         """Add site/auction metadata to scraped records."""
         # This assumes lot_number is unique enough to identify records
         # You might need to adjust based on your actual schema
@@ -316,7 +303,7 @@ class Pipeline:
     def run_full(
         self,
         site: str,
-        auction_id: str,
+        sale_id: str,
         lots: range,
         closing_date: str = None,
     ) -> Dict[str, Any]:
@@ -331,7 +318,7 @@ class Pipeline:
         
         # Step 1: Scrape
         print("\n[1/3] SCRAPING")
-        scrape_stats = self.scrape(site, auction_id, lots, closing_date)
+        scrape_stats = self.scrape(site, sale_id, lots, closing_date)
         results['scrape'] = scrape_stats
         
         # Step 2: Vision
