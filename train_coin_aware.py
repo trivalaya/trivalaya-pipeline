@@ -55,15 +55,18 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple, Optional
 from collections import defaultdict
-
 import numpy as np
+import pandas as pd
+from sklearn.metrics import confusion_matrix
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms, models
 import torchvision.transforms.functional as TF
 from PIL import Image
-
+from io import BytesIO
+import boto3
+from botocore.config import Config
 
 # -------------------------
 # Determinism / Reproducibility
@@ -192,6 +195,97 @@ def record_has_complete_pair(r: Dict[str, Any]) -> bool:
         return False
     return True
 
+# --- add helper (e.g., under manifest helpers) ---
+def resolve_local_path(path: Optional[str], base_path: Optional[str]) -> Optional[str]:
+    """
+    Resolve manifest path to a local filesystem path for os.path.exists/Image.open.
+    - Absolute paths stay as-is.
+    - Relative paths are joined to base_path when provided.
+    """
+    if not path:
+        return None
+    p = Path(path)
+    if p.is_absolute():
+        return str(p)
+    if base_path:
+        return str(Path(base_path) / p)
+    return str(p)
+def is_spaces_key(path: Optional[str]) -> bool:
+    return isinstance(path, str) and (path.startswith("processed/") or path.startswith("raw/"))
+
+_S3_CLIENT = None
+
+def get_s3_client():
+    global _S3_CLIENT
+    if _S3_CLIENT is None:
+        endpoint = os.getenv("SPACES_ENDPOINT")
+        key = os.getenv("AWS_ACCESS_KEY_ID")
+        secret = os.getenv("AWS_SECRET_ACCESS_KEY")
+        region = os.getenv("SPACES_REGION", "sfo3")
+
+        if not endpoint or not key or not secret:
+            raise RuntimeError(
+                "Missing SPACES_ENDPOINT / AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for Spaces access"
+            )
+
+        _S3_CLIENT = boto3.client(
+            "s3",
+            region_name=region,
+            endpoint_url=endpoint,
+            aws_access_key_id=key,
+            aws_secret_access_key=secret,
+            config=Config(signature_version="s3v4"),
+        )
+    return _S3_CLIENT
+# -- Confusion Matrix function do not remove this functionality
+def save_eval_artifacts(y_true, y_pred, periods, out_prefix, mode):
+    from sklearn.metrics import confusion_matrix, classification_report
+    import numpy as np, json
+
+    labels = list(range(len(periods)))
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
+    np.savetxt(f"{out_prefix}_{mode}_confusion_matrix.csv", cm, fmt="%d", delimiter=",")
+
+    cm_norm = cm.astype(np.float64)
+    row_sums = cm_norm.sum(axis=1, keepdims=True)
+    cm_norm = np.divide(cm_norm, np.where(row_sums == 0, 1, row_sums))
+    np.savetxt(f"{out_prefix}_{mode}_confusion_matrix_normalized.csv", cm_norm, fmt="%.6f", delimiter=",")
+
+    report = classification_report(
+        y_true, y_pred,
+        labels=labels,
+        target_names=periods,
+        digits=4,
+        output_dict=True,
+        zero_division=0
+    )
+    with open(f"{out_prefix}_{mode}_classification_report.json", "w") as f:
+        json.dump(report, f, indent=2)
+
+
+def load_image_any(path: Optional[str], base_path: Optional[str]) -> Image.Image:
+    """
+    Load image from:
+      - DigitalOcean Spaces key (processed/... or raw/...)
+      - local filesystem path (absolute or base_path + relative)
+    """
+    if not path:
+        raise FileNotFoundError("Empty image path")
+
+    if is_spaces_key(path):
+        bucket = os.getenv("SPACES_BUCKET")
+        if not bucket:
+            raise RuntimeError("Missing SPACES_BUCKET")
+        s3 = get_s3_client()
+        obj = s3.get_object(Bucket=bucket, Key=path)
+        return Image.open(BytesIO(obj["Body"].read())).convert("RGB")
+
+    resolved = resolve_local_path(path, base_path)
+    if not resolved or not os.path.exists(resolved):
+        raise FileNotFoundError(f"Missing local file: {path} (resolved: {resolved})")
+
+    with Image.open(resolved) as im:
+        return im.convert("RGB")
 
 # -------------------------
 # Common label mapping + weights
@@ -242,83 +336,76 @@ def make_transforms(cfg: TrainConfig) -> Tuple[transforms.Compose, transforms.Co
 # -------------------------
 # Datasets + Collate
 # -------------------------
+# --- SideDataset: add base_path param + use resolved path ---
 class SideDataset(Dataset):
-    def __init__(self, records: List[Dict[str, Any]], transform, period_to_idx: Dict[str, int], skipped_files: set):
+    def __init__(self, records, transform, period_to_idx, skipped_files: set, base_path: Optional[str] = None):
         self.records = records
         self.transform = transform
         self.period_to_idx = period_to_idx
         self.skipped_files = skipped_files
-
+        self.base_path = base_path
     def __len__(self) -> int:
         return len(self.records)
-
     def __getitem__(self, idx: int):
         r = self.records[idx]
-        path = r.get("image_path")
+        raw_path = r.get("image_path")
         try:
-            if not path or not os.path.exists(path):
-                raise FileNotFoundError(f"Missing file: {path}")
-
-            with Image.open(path) as im:
-                img = im.convert("RGB")
+            img = load_image_any(raw_path, self.base_path)
 
             y = self.period_to_idx[r["period"]]
             mi = r["_manifest_index"]
-            return self.transform(img), torch.tensor(y, dtype=torch.long), mi, path
+            return self.transform(img), torch.tensor(y, dtype=torch.long), mi, raw_path
         except Exception:
-            if path:
-                self.skipped_files.add(path)
+            if raw_path:
+                self.skipped_files.add(raw_path)
             return None
 
 
+# --- PairDataset: add base_path param + resolve both sides ---
 class PairDataset(Dataset):
-    def __init__(self, pairs: List[Dict[str, Any]], transform, period_to_idx: Dict[str, int], skipped_files: set):
+    def __init__(self, pairs, transform, period_to_idx, skipped_files: set, base_path: Optional[str] = None):
         self.pairs = pairs
         self.transform = transform
         self.period_to_idx = period_to_idx
         self.skipped_files = skipped_files
-
+        self.base_path = base_path
     def __len__(self) -> int:
         return len(self.pairs)
-
     def __getitem__(self, idx: int):
         r = self.pairs[idx]
-        obv_path = (
+        raw_obv = (
             r.get("obverse", {}).get("image_path")
             or r.get("obv_path")
             or r.get("obverse_path")
         )
-        rev_path = (
+        raw_rev = (
             r.get("reverse", {}).get("image_path")
             or r.get("rev_path")
             or r.get("reverse_path")
         )
-        try:
-            if not obv_path or not os.path.exists(obv_path):
-                raise FileNotFoundError(f"Missing obverse: {obv_path}")
-            if not rev_path or not os.path.exists(rev_path):
-                raise FileNotFoundError(f"Missing reverse: {rev_path}")
 
-            with Image.open(obv_path) as im:
-                obv = im.convert("RGB")
-            with Image.open(rev_path) as im:
-                rev = im.convert("RGB")
+        try:
+            obv = load_image_any(raw_obv, self.base_path)
+            rev = load_image_any(raw_rev, self.base_path)
 
             y = self.period_to_idx[r["period"]]
             mi = r["_manifest_index"]
-            coin_id = (
-            r.get("coin_identity")
-            or r.get("coin_id")
-            or f"pair_{mi}"
-        )
-            return self.transform(obv), self.transform(rev), torch.tensor(y, dtype=torch.long), mi, coin_id, obv_path, rev_path
+            coin_id = r.get("coin_identity") or r.get("coin_id") or f"pair_{mi}"
+            return (
+                self.transform(obv),
+                self.transform(rev),
+                torch.tensor(y, dtype=torch.long),
+                mi,
+                coin_id,
+                raw_obv,
+                raw_rev,
+            )
         except Exception:
-            if obv_path:
-                self.skipped_files.add(obv_path)
-            if rev_path:
-                self.skipped_files.add(rev_path)
+            if raw_obv:
+                self.skipped_files.add(raw_obv)
+            if raw_rev:
+                self.skipped_files.add(raw_rev)
             return None
-
 
 def collate_skip_none_sides(batch):
     batch = [b for b in batch if b is not None]
@@ -494,14 +581,15 @@ def train_loop_sides(
     val_records: List[Dict[str, Any]],
     class_weights: torch.Tensor,
     out_prefix: str,
+    base_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     skipped_files: set = set()
 
     train_t, val_t = make_transforms(cfg)
 
-    train_ds = SideDataset(train_records, train_t, period_to_idx, skipped_files)
-    val_ds = SideDataset(val_records, val_t, period_to_idx, skipped_files)
+    train_ds = SideDataset(train_records, train_t, period_to_idx, skipped_files, base_path=base_path)
+    val_ds = SideDataset(val_records, val_t, period_to_idx, skipped_files, base_path=base_path)
 
     train_loader = build_loader(train_ds, cfg, shuffle=True, collate_fn=collate_skip_none_sides)
     val_loader = build_loader(val_ds, cfg, shuffle=False, collate_fn=collate_skip_none_sides)
@@ -540,6 +628,10 @@ def train_loop_sides(
             steps += 1
 
         # val
+        if train_seen == 0:
+            raise RuntimeError(
+                f"[SIDES] No training samples loaded. Check Spaces/local access. skipped={len(skipped_files)}"
+            )
         model.eval()
         val_correct = 0
         val_seen = 0
@@ -563,7 +655,23 @@ def train_loop_sides(
         if val_acc >= best_val:
             best_val = val_acc
             torch.save(model.state_dict(), model_path)
+    #save confusion matrix data        
+    y_true, y_pred = [], []
+    with torch.no_grad():
+        for batch in val_loader:
+            if batch is None:
+                continue
+            imgs, labels, _, _ = batch
+            imgs = imgs.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
 
+            logits = model(imgs)
+            preds = logits.argmax(1)
+
+            y_true.extend(labels.cpu().numpy().tolist())
+            y_pred.extend(preds.cpu().numpy().tolist())
+
+    save_eval_artifacts(y_true, y_pred, periods, out_prefix, mode="sides")
     meta = {
         "mode": "sides",
         "best_val_acc": best_val,
@@ -599,14 +707,15 @@ def train_loop_pairs(
     val_pairs: List[Dict[str, Any]],
     class_weights: torch.Tensor,
     out_prefix: str,
+    base_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     skipped_files: set = set()
 
     train_t, val_t = make_transforms(cfg)
 
-    train_ds = PairDataset(train_pairs, train_t, period_to_idx, skipped_files)
-    val_ds = PairDataset(val_pairs, val_t, period_to_idx, skipped_files)
+    train_ds = PairDataset(train_pairs, train_t, period_to_idx, skipped_files, base_path=base_path)
+    val_ds = PairDataset(val_pairs, val_t, period_to_idx, skipped_files, base_path=base_path)
 
     train_loader = build_loader(train_ds, cfg, shuffle=True, collate_fn=collate_skip_none_pairs)
     val_loader = build_loader(val_ds, cfg, shuffle=False, collate_fn=collate_skip_none_pairs)
@@ -644,9 +753,29 @@ def train_loop_pairs(
             train_correct += int((logits.argmax(1) == labels).sum().item())
             train_seen += int(labels.size(0))
             steps += 1
-
-        # val
+        if train_seen == 0:
+            raise RuntimeError(
+                f"[PAIRS] No training samples loaded. Check Spaces/local access. skipped={len(skipped_files)}"
+            )
+        #save eval
         model.eval()
+        y_true, y_pred = [], []
+        with torch.no_grad():
+            for batch in val_loader:
+                if batch is None:
+                    continue
+                obv, rev, labels, _, _, _, _ = batch
+                obv = obv.to(device, non_blocking=True)
+                rev = rev.to(device, non_blocking=True)
+                labels = labels.to(device, non_blocking=True)
+
+                logits = model(obv, rev)
+                preds = logits.argmax(1)
+
+                y_true.extend(labels.cpu().numpy().tolist())
+                y_pred.extend(preds.cpu().numpy().tolist())
+
+        #val
         val_correct = 0
         val_seen = 0
         with torch.no_grad():
@@ -711,6 +840,7 @@ def export_embeddings_sides(
     val_transform,
     manifest_length: int,
     out_prefix: str,
+    base_path: Optional[str] = None,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     trained_model.eval()
@@ -725,8 +855,7 @@ def export_embeddings_sides(
     # Keep only valid, preserve manifest order
     full = [r for r in records_all if r.get("period") and r.get("image_path")]
     skipped_files: set = set()
-    ds = SideDataset(full, val_transform, period_to_idx, skipped_files)
-
+    ds = SideDataset(full, val_transform, period_to_idx, skipped_files, base_path=base_path)
     # O(1) lookup manifest index -> path
     manifest_to_path = {r["_manifest_index"]: r["image_path"] for r in full}
 
@@ -798,6 +927,7 @@ def export_embeddings_pairs(
     val_transform,
     manifest_length: int,
     out_prefix: str,
+    base_path: Optional[str] = None,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     trained_model.eval()
@@ -811,7 +941,7 @@ def export_embeddings_pairs(
         if r.get("period") and record_has_complete_pair(r)
     ]
     skipped_files: set = set()
-    ds = PairDataset(full, val_transform, period_to_idx, skipped_files)
+    ds = PairDataset(full, val_transform, period_to_idx, skipped_files, base_path=base_path)
 
     # O(1) lookup for paths
     manifest_to_paths = {r["_manifest_index"]: get_pair_paths(r) for r in full}
@@ -904,6 +1034,11 @@ def main():
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
+    parser.add_argument(
+        "--base-path",
+        default=os.getenv("TRIVALAYA_LOCAL_DATA", ""),
+        help="Local root prepended to relative manifest paths (or TRIVALAYA_LOCAL_DATA env var).",
+    )
     args = parser.parse_args()
 
     cfg = TrainConfig()
@@ -943,13 +1078,16 @@ def main():
         train_records, val_records, train_counts = split_sides(side_records, seed=cfg.seed)
         class_weights = compute_class_weights(train_counts, periods, cfg.max_weight_cap)
 
-        run = train_loop_sides(cfg, periods, period_to_idx, train_records, val_records, class_weights, args.output_prefix)
+        run = train_loop_sides(
+        cfg, periods, period_to_idx, train_records, val_records, class_weights, args.output_prefix,
+        base_path=args.base_path
+        )
 
         export_embeddings_sides(
             cfg, records_all, periods, period_to_idx,
-            run["model"], run["val_transform"], manifest_length, args.output_prefix
+            run["model"], run["val_transform"], manifest_length, args.output_prefix,
+            base_path=args.base_path
         )
-
     elif chosen_mode == "pairs":
         pair_records = [
             r for r in valid
@@ -969,11 +1107,15 @@ def main():
         train_pairs, val_pairs, train_counts = split_pairs(pair_records, seed=cfg.seed)
         class_weights = compute_class_weights(train_counts, periods, cfg.max_weight_cap)
 
-        run = train_loop_pairs(cfg, periods, period_to_idx, train_pairs, val_pairs, class_weights, args.output_prefix)
+        run = train_loop_pairs(
+        cfg, periods, period_to_idx, train_pairs, val_pairs, class_weights, args.output_prefix,
+        base_path=args.base_path
+        )
 
         export_embeddings_pairs(
-            cfg, records_all, periods, period_to_idx,
-            run["model"], run["val_transform"], manifest_length, args.output_prefix
+        cfg, records_all, periods, period_to_idx,
+        run["model"], run["val_transform"], manifest_length, args.output_prefix,
+        base_path=args.base_path
         )
 
     else:

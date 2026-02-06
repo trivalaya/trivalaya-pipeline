@@ -1,7 +1,30 @@
 import pandas as pd
 import os
 import argparse
+import boto3
 from collections import Counter
+from dotenv import dotenv_values
+
+# Load Spaces config
+_spaces_cfg = dotenv_values("/etc/trivalaya/spaces.env")
+_s3_client = boto3.client(
+    's3',
+    region_name=_spaces_cfg.get('SPACES_REGION', 'sfo3'),
+    endpoint_url=_spaces_cfg.get('SPACES_ENDPOINT', 'https://sfo3.digitaloceanspaces.com'),
+    aws_access_key_id=os.getenv('SPACES_KEY') or _spaces_cfg.get('SPACES_KEY'),
+    aws_secret_access_key=os.getenv('SPACES_SECRET') or _spaces_cfg.get('SPACES_SECRET'),
+)
+_spaces_bucket = _spaces_cfg.get('SPACES_BUCKET', 'trivalaya-data')
+
+def presigned_url(key, expires=86400):
+    """Generate a presigned URL for a Spaces object (default 24h)."""
+    if not key:
+        return ''
+    return _s3_client.generate_presigned_url(
+        'get_object',
+        Params={'Bucket': _spaces_bucket, 'Key': key},
+        ExpiresIn=expires,
+    )
 
 def get_period_color(period):
     colors = {
@@ -11,12 +34,13 @@ def get_period_color(period):
     }
     return colors.get(str(period).lower(), '#6b7280')
 
-def resolve_image_path(path_str):
-    # Quick fix to make sure local server can find the images
-    cwd = os.getcwd()
-    if path_str.startswith(cwd):
-        return os.path.relpath(path_str, cwd)
-    return path_str
+def resolve_image_url(path_str):
+    """Generate a presigned Spaces URL for the image."""
+    if not path_str or pd.isna(path_str):
+        return ''
+    # Strip any leading ./ or / to get the clean Spaces key
+    key = str(path_str).lstrip('./')
+    return presigned_url(key)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -140,11 +164,28 @@ def main():
         # Images
         img_html = ""
         for _, row in c['images'].iterrows():
-            img_path = resolve_image_path(row['image_path'])
-            img_html += f"""
-                <div class="card" title="{row['parser_period']}">
-                    <img src="{img_path}" loading="lazy">
-                    <div class="label">{row['parser_period']}</div>
+            obv_path = row.get('obv_path', '')
+            rev_path = row.get('rev_path', '')
+            period = row.get('parser_period', 'unknown')
+            
+            if pd.notna(obv_path) and obv_path and pd.notna(rev_path) and rev_path:
+                obv_url = resolve_image_url(obv_path)
+                rev_url = resolve_image_url(rev_path)
+                img_html += f"""
+                <div class="card" title="{period}" style="aspect-ratio: 2/1; grid-column: span 2;">
+                    <img src="{obv_url}" loading="lazy" style="width:50%; float:left; height:100%; object-fit:cover;">
+                    <img src="{rev_url}" loading="lazy" style="width:50%; float:left; height:100%; object-fit:cover;">
+                    <div class="label">{period}</div>
+                </div>"""
+            else:
+                # Fallback: single image
+                img_path = obv_path or rev_path or row.get('image_path', '')
+                img_url = resolve_image_url(img_path)
+                if img_url:
+                    img_html += f"""
+                <div class="card" title="{period}">
+                    <img src="{img_url}" loading="lazy">
+                    <div class="label">{period}</div>
                 </div>"""
 
         html_parts.append(f"""
