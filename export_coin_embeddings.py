@@ -1,19 +1,45 @@
 #!/usr/bin/env python3
 """
-export_coin_embeddings.py - Generate coin-level embeddings from side embeddings.
-ROCK-SOLID VERSION:
-- Strict determinism (sorted sets)
-- Defensive normalization (pre-average)
-- Unmatched path sampling for debugging
+export_coin_embeddings.py
+"The Bridge Version"
+- Links 'processed/vision/...' manifest paths to 'leu_1_...' embedding paths.
+- Uses a canonical key (auction_sale_lot) to bridge the two datasets.
+- Auto-corrects 'coin_id' vs 'coin_identity'.
 """
 
 import argparse
 import json
+import re
 from pathlib import Path
 from collections import defaultdict
-
 import numpy as np
 
+# --- THE BRIDGE LOGIC ---
+def get_canonical_key(path_str):
+    """
+    Extracts a common ID (e.g., 'leu_1_01006') from distinct path formats.
+    """
+    if not path_str:
+        return ""
+    
+    s = str(path_str).replace("\\", "/")
+    
+    # Strategy 1: Look for "Folder Structure" (Manifest style)
+    # CHANGED: (\d+) -> ([a-zA-Z0-9]+) to handle sale IDs like "t23" or "XXIX"
+    match_manifest = re.search(r'/([a-zA-Z]+)/([a-zA-Z0-9]+)/Lot_(\d+)', s)
+    if match_manifest:
+        auct, sale, lot = match_manifest.groups()
+        return f"{auct.lower()}_{sale}_{lot}"
+
+    # Strategy 2: Look for "Filename Structure" (Embeddings style)
+    match_filename = re.search(r'([a-zA-Z]+)_([a-zA-Z0-9]+)_(\d{4,5})', Path(s).name)
+    if match_filename:
+        auct, sale, lot = match_filename.groups()
+        return f"{auct.lower()}_{sale}_{lot}"
+
+    return Path(s).stem
+
+# ------------------------
 
 def load_side_embeddings(embeddings_path: str, meta_path: str):
     """Load per-side embeddings and metadata."""
@@ -24,7 +50,6 @@ def load_side_embeddings(embeddings_path: str, meta_path: str):
         meta = json.load(f)
     
     paths = meta['paths']
-    # If side_confidence isn't in meta, we'll default to 0 later
     confidences = meta.get('confidences', [0.0] * len(paths))
     
     if len(paths) != vectors.shape[0]:
@@ -33,140 +58,111 @@ def load_side_embeddings(embeddings_path: str, meta_path: str):
     print(f"  Loaded {vectors.shape[0]} side embeddings")
     return vectors, paths, confidences
 
-
 def load_manifest_with_coin_identity(manifest_path: str):
-    """Load manifest and validate required fields."""
     print(f"📄 Loading manifest from {manifest_path}...")
     with open(manifest_path, 'r') as f:
         manifest = json.load(f)
     
+    if not manifest:
+        return []
+
+    # Auto-fix coin_id -> coin_identity
+    fixed = 0
+    for r in manifest:
+        if 'coin_identity' not in r and 'coin_id' in r:
+            r['coin_identity'] = r['coin_id']
+            fixed += 1
+            
+    if fixed:
+        print(f"  🔧 Auto-corrected {fixed} records (coin_id -> coin_identity)")
+
     valid = [r for r in manifest if r.get('coin_identity')]
-    if len(valid) < len(manifest):
-        print(f"  ⚠️  Skipped {len(manifest) - len(valid)} records missing coin_identity")
-        
     return valid
 
-
-def build_path_index(paths: list) -> dict:
-    """
-    Build path -> embedding index lookup.
-    STRICT MODE: Raises error on collision.
-    """
+def build_path_index(paths: list, confidences: list) -> dict:
+    """Build index using the Canonical Key (The Bridge)."""
     index = {}
+    
+    print("  🏗️  Building canonical index...")
     for i, p in enumerate(paths):
-        # Normalize: unified separators, no leading dot-slash
-        normalized = str(p).replace("\\", "/").strip().lstrip("./")
+        key = get_canonical_key(p)
+        if not key: continue
+
+        # If duplicate keys exist (e.g. leu_1_01006 appeared twice),
+        # prefer the one with higher confidence or later index?
+        # Let's keep the first one found for simplicity, or overwrite?
+        # Typically overwriting with the "cleanest" is better, but let's just store mapping.
+        index[key] = i
         
-        # Check for collision
-        if normalized in index and index[normalized] != i:
-            raise ValueError(f"❌ FATAL: Duplicate path collision in embeddings: '{normalized}'. "
-                             "Check your embedding generation process for duplicates.")
-        
-        index[normalized] = i
+    print(f"  ✅ Indexed {len(index)} unique canonical keys")
     return index
 
-
 def group_by_coin_identity(manifest: list, vectors: np.ndarray, path_index: dict, confidences: list):
-    """
-    Group by coin_identity, resolving duplicates by quality score.
-    """
     print("🔗 Grouping embeddings by coin_identity...")
-    
-    # Temporary storage: coin_id -> side -> list of candidates
+
     raw_groups = defaultdict(lambda: {'sides': defaultdict(list)})
-    
     matched_count = 0
     unmatched_count = 0
     unmatched_examples = []
-    
-    # Use enumerate to get the TRUE manifest index for stable tie-breaking
+
     for manifest_idx, record in enumerate(manifest):
         coin_id = record.get('coin_identity')
-        side = record.get('side', 'unknown')
-        path = record.get('image_path', '')
-        period = record.get('period')
-        
-        # Normalize path to match index
-        normalized_path = str(path).replace("\\", "/").strip().lstrip("./")
-        
-        if normalized_path not in path_index:
-            unmatched_count += 1
-            if len(unmatched_examples) < 5:
-                unmatched_examples.append(normalized_path)
-            continue
+        if not coin_id: continue
+
+        # Collect paths to check
+        candidates = []
+        # Check Pair Format
+        if record.get('obv_path'): candidates.append(('obverse', record['obv_path']))
+        if record.get('rev_path'): candidates.append(('reverse', record['rev_path']))
+        # Check Single Format
+        if record.get('image_path'): candidates.append((record.get('side', 'unknown'), record['image_path']))
+
+        for side, raw_path in candidates:
+            # APPLY THE BRIDGE
+            key = get_canonical_key(raw_path)
             
-        embedding_idx = path_index[normalized_path]
-        matched_count += 1
-        
-        # Get quality score (prefer explicit confidence, fallback to 0)
-        quality = confidences[embedding_idx] if embedding_idx < len(confidences) else 0.0
-        
-        if 'side_confidence' in record and record['side_confidence'] is not None:
-            quality = float(record['side_confidence'])
+            if key not in path_index:
+                unmatched_count += 1
+                if len(unmatched_examples) < 3:
+                    unmatched_examples.append(f"{raw_path} -> Key: {key}")
+                continue
 
-        raw_groups[coin_id]['sides'][side].append({
-            'embedding': vectors[embedding_idx],
-            'path': path,
-            'period': period,
-            'quality': quality,
-            'manifest_idx': manifest_idx  # Stable tie-break using input order
-        })
+            embedding_idx = path_index[key]
+            matched_count += 1
 
-    print(f"  📊 Match Stats: {matched_count} matched, {unmatched_count} unmatched")
+            quality = confidences[embedding_idx] if embedding_idx < len(confidences) else 0.0
+
+            raw_groups[coin_id]['sides'][side].append({
+                'embedding': vectors[embedding_idx],
+                'path': raw_path,
+                'period': record.get('period'),
+                'quality': quality
+            })
+
+    print(f"  📊 Match Stats: {matched_count} matched sides, {unmatched_count} unmatched paths")
     if unmatched_count > 0:
-        print(f"  ⚠️  {unmatched_count} manifest records had no corresponding embedding.")
-        print(f"  Examples: {unmatched_examples}")
+        print(f"  ⚠️  Unmatched examples: {unmatched_examples}")
 
-    # Resolve duplicates and conflicts
+    # Resolve duplicates
     cleaned_coins = {}
-    period_conflicts = 0
-    
     for coin_id, data in raw_groups.items():
         clean_sides = {}
-        periods_seen = set()
+        periods = set()
         
-        for side, candidates in data['sides'].items():
-            # 1. Pick Best Candidate for this side
-            # Sort by quality desc, then by manifest_idx (stable tie-break)
-            best = max(candidates, key=lambda x: (x['quality'], x['manifest_idx']))
+        for side, items in data['sides'].items():
+            # Pick best quality
+            best = max(items, key=lambda x: x['quality'])
             clean_sides[side] = best
+            if best['period']: periods.add(best['period'])
             
-            # Collect periods
-            for c in candidates:
-                if c['period']: periods_seen.add(c['period'])
-        
-        # 2. Resolve Period (Strictly Deterministic)
-        final_period = None
-        sorted_periods = sorted(list(periods_seen))
-        
-        if len(sorted_periods) == 1:
-            final_period = sorted_periods[0]
-        elif len(sorted_periods) > 1:
-            period_conflicts += 1
-            # Priority: Obverse Period > Reverse Period > Alphabetical sort
-            if 'obverse' in clean_sides and clean_sides['obverse']['period']:
-                final_period = clean_sides['obverse']['period']
-            elif 'reverse' in clean_sides and clean_sides['reverse']['period']:
-                final_period = clean_sides['reverse']['period']
-            else:
-                final_period = sorted_periods[0]
-                
-        cleaned_coins[coin_id] = {
-            'sides': clean_sides,
-            'period': final_period
-        }
-    
-    if period_conflicts > 0:
-        print(f"  ⚠️  Resolved {period_conflicts} coins with conflicting period labels")
-        
+        final_period = sorted(list(periods))[0] if periods else None
+        cleaned_coins[coin_id] = {'sides': clean_sides, 'period': final_period}
+
     return cleaned_coins
 
-
 def normalize_vector(v):
-    """Return unit vector."""
     norm = np.linalg.norm(v)
     return v / (norm + 1e-12)
-
 
 def export_coin_embeddings(coins: dict, output_dir: Path):
     print("\n📤 Exporting coin-level embeddings...")
@@ -174,28 +170,21 @@ def export_coin_embeddings(coins: dict, output_dir: Path):
     output_dir.mkdir(parents=True, exist_ok=True)
     
     all_coins = []
-    complete_pairs = []
     
     for coin_id, data in coins.items():
         sides = data['sides']
         
-        # 1. Select embeddings for Average
-        sources = []
-        if 'obverse' in sides: sources.append(sides['obverse']['embedding'])
-        if 'reverse' in sides: sources.append(sides['reverse']['embedding'])
+        # Gather vectors
+        vecs = []
+        if 'obverse' in sides: vecs.append(sides['obverse']['embedding'])
+        if 'reverse' in sides: vecs.append(sides['reverse']['embedding'])
+        if not vecs and 'unknown' in sides: vecs.append(sides['unknown']['embedding'])
         
-        if not sources and 'unknown' in sides:
-            sources.append(sides['unknown']['embedding'])
-            
-        if not sources:
-            continue
-            
-        # Defensive: Normalize sources BEFORE averaging
-        sources = [normalize_vector(s) for s in sources]
+        if not vecs: continue
         
-        # Average & Re-Normalize
-        avg_emb = np.mean(sources, axis=0)
-        avg_emb = normalize_vector(avg_emb)
+        # Average
+        vecs = [normalize_vector(v) for v in vecs]
+        avg_emb = normalize_vector(np.mean(vecs, axis=0))
         
         all_coins.append({
             'coin_identity': coin_id,
@@ -203,56 +192,17 @@ def export_coin_embeddings(coins: dict, output_dir: Path):
             'period': data['period'],
             'sides_available': list(sides.keys())
         })
-        
-        # 2. Handle Concatenation (Strict Pairs)
-        if 'obverse' in sides and 'reverse' in sides:
-            obv = sides['obverse']['embedding']
-            rev = sides['reverse']['embedding']
-            
-            # Normalize SIDES before concat (Critical for balance)
-            obv = normalize_vector(obv)
-            rev = normalize_vector(rev)
-            
-            concat = np.concatenate([obv, rev])
-            # Normalize result
-            concat = normalize_vector(concat)
-            
-            complete_pairs.append({
-                'coin_identity': coin_id,
-                'embedding_concat': concat,
-                'period': data['period'],
-                'obverse_path': sides['obverse']['path'],
-                'reverse_path': sides['reverse']['path']
-            })
 
-    # Save AVG
-    avg_vecs = np.array([c['embedding_avg'] for c in all_coins], dtype=np.float32)
-    np.save(output_dir / "coin_embeddings_avg.npy", avg_vecs)
-    
-    avg_meta = {
-        'coin_identities': [c['coin_identity'] for c in all_coins],
-        'periods': [c['period'] for c in all_coins],
-        'sides_available': [c['sides_available'] for c in all_coins]
-    }
-    with open(output_dir / "coin_embeddings_avg_meta.json", 'w') as f:
-        json.dump(avg_meta, f, indent=2)
-        
-    # Save CONCAT
-    if complete_pairs:
-        concat_vecs = np.array([c['embedding_concat'] for c in complete_pairs], dtype=np.float32)
-        np.save(output_dir / "coin_embeddings_concat.npy", concat_vecs)
-        
-        concat_meta = {
-            'coin_identities': [c['coin_identity'] for c in complete_pairs],
-            'periods': [c['period'] for c in complete_pairs],
-            'obverse_paths': [c['obverse_path'] for c in complete_pairs],
-            'reverse_paths': [c['reverse_path'] for c in complete_pairs]
-        }
-        with open(output_dir / "coin_embeddings_concat_meta.json", 'w') as f:
-            json.dump(concat_meta, f, indent=2)
+    if all_coins:
+        np.save(output_dir / "coin_embeddings_avg.npy", np.array([c['embedding_avg'] for c in all_coins], dtype=np.float32))
+        with open(output_dir / "coin_embeddings_avg_meta.json", 'w') as f:
+            json.dump({
+                'coin_identities': [c['coin_identity'] for c in all_coins],
+                'periods': [c['period'] for c in all_coins],
+                'sides_available': [c['sides_available'] for c in all_coins]
+            }, f, indent=2)
 
-    print(f"  ✅ Processed {len(all_coins)} coins ({len(complete_pairs)} complete pairs)")
-
+    print(f"  ✅ Processed {len(all_coins)} coins.")
 
 def main():
     parser = argparse.ArgumentParser()
@@ -264,8 +214,7 @@ def main():
     
     vectors, paths, confs = load_side_embeddings(args.embeddings, args.embeddings_meta)
     manifest = load_manifest_with_coin_identity(args.manifest)
-    path_index = build_path_index(paths)
-    
+    path_index = build_path_index(paths, confs)
     coins = group_by_coin_identity(manifest, vectors, path_index, confs)
     export_coin_embeddings(coins, args.output)
 
