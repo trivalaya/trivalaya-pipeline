@@ -46,10 +46,13 @@ if str(project_root) not in sys.path:
 # 2. Optional Imports
 # -----------------------------------------------------------------------------
 try:
+    _vision_src = Path("/root/trivalaya-vision/src")
+    if str(_vision_src) not in sys.path:
+        sys.path.insert(0, str(_vision_src))
     from two_coin_resolver import TwoCoinResolver
     TWO_COIN_AVAILABLE = True
 except ImportError:
-    print("⚠️ TwoCoinResolver not found. Auto-splitting disabled.")
+    print("⚠️ TwoCoinResolver not found at /root/trivalaya-vision/src. Auto-splitting disabled.")
     TWO_COIN_AVAILABLE = False
     class TwoCoinResolver: pass
 except Exception as e:
