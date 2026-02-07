@@ -39,6 +39,13 @@ class Pipeline:
         pipeline.export_ml_dataset()
     """
     
+    @staticmethod
+    def _safe_int(value, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+    
     def __init__(
         self,
         scraper_path: str = None,
@@ -209,7 +216,6 @@ class Pipeline:
             
             if not image_path.exists():
                 stats['skipped'] += 1
-                self.db.mark_vision_processed(record.id)
                 continue
             
             # Run vision
@@ -227,7 +233,8 @@ class Pipeline:
                 continue
             
             # Extract coins
-            base_name = f"{record.auction_house or 'lot'}_{record.sale_id or '0'}_{record.lot_number:05d}"
+            safe_lot = self._safe_int(record.lot_number)
+            base_name = f"{record.auction_house or 'lot'}_{record.sale_id or '0'}_{safe_lot:05d}"
             output_dir = self.paths.extracted_coins / (record.auction_house or 'unknown') / (record.sale_id or '0')
             
             extractions = self.vision.extract_coins(
@@ -251,6 +258,33 @@ class Pipeline:
         print(f"\nVision complete: {stats['processed']} images, {stats['detections']} coins")
         return stats
     
+    # =========================================================================
+    # COIN PAIRING
+    # =========================================================================
+    
+    def pair_detections(self, min_likelihood: float = 0.5) -> Dict[str, int]:
+        """
+        Pair unlinked detections into coin entities with side assignments.
+        
+        Groups detections by auction_record_id, creates coin records,
+        and assigns obverse/reverse based on spatial position.
+        """
+        print(f"\n{'='*60}")
+        print(f"COIN PAIRING")
+        print(f"{'='*60}")
+        
+        stats = self.db.pair_unlinked_detections(min_likelihood)
+        
+        print(f"\nPairing complete:")
+        print(f"  Records processed: {stats['records_processed']}")
+        print(f"  Coins created: {stats['coins_created']}")
+        print(f"  Detections linked: {stats['detections_linked']}")
+        print(f"  Pairs (obv+rev): {stats['pairs_assigned']}")
+        print(f"  Singles: {stats['singles']}")
+        print(f"  Multi-detection lots: {stats['multi_detection']}")
+        
+        return stats
+
     # =========================================================================
     # ML EXPORT
     # =========================================================================

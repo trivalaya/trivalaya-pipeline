@@ -10,8 +10,11 @@ and be reused for other artifact types (pottery, seals, etc.)
 
 import sys
 import json
+import shutil
 import cv2
 import numpy as np
+import tempfile
+from trivalaya_pipeline.storage.spaces_client import SpacesClient
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
@@ -30,6 +33,12 @@ class VisionResult:
     @property
     def coin_count(self) -> int:
         return len(self.detections)
+@dataclass
+class VisionJobContext:
+    site: str
+    sale_id: str
+    lot_number: int
+    version: str = "v1"
 
 
 class VisionAdapter:
@@ -50,14 +59,51 @@ class VisionAdapter:
     ):
         self.paths = paths or PathConfig()
         self.config = vision_config or VisionConfig()
-        
+        self.spaces: SpacesClient | None = None
         self._vision_loaded = False
         self._analyze_image = None
         self._layer1 = None
         self._layer2 = None
         
         self._load_vision_module()
-    
+
+    def _is_spaces_key(self, s: str) -> bool:
+     return isinstance(s, str) and (s.startswith("raw/") or s.startswith("processed/") or s.startswith("ml/"))
+    def _vision_prefix(self, version: str, site: str, sale_id: str, lot_number: int) -> str:
+        return f"processed/vision/{version}/crops/{site}/{sale_id}/Lot_{lot_number:05d}"
+
+    def _vision_key(self, version: str, site: str, sale_id: str, lot_number: int, filename: str) -> str:
+        return f"{self._vision_prefix(version, site, sale_id, lot_number)}/{filename}"
+    def _resolve_input_to_local(self, image_path: Path) -> Path:
+        """
+        Accepts either a local path or a Spaces key.
+        Returns a local file path (downloads from Spaces if needed).
+        """
+        p = Path(str(image_path))
+        s = str(image_path)
+
+        if self._is_spaces_key(s):
+            if self.spaces is None:
+                self.spaces = SpacesClient()
+            td = Path(tempfile.mkdtemp(prefix="triv_vision_in_"))
+            local = td / Path(s).name
+            self.spaces.download_file(s, str(local))
+            return local
+
+        # local
+        return p
+    def _upload_if_spaces(self, local_path: Path, key: str, content_type: str) -> str:
+        """
+        If Spaces is enabled, upload and return the Spaces key.
+        Otherwise return local path string.
+        """
+        if self.spaces is None:
+            return str(local_path)
+
+        self.spaces.upload_file(str(local_path), key, content_type=content_type)
+        local_path.unlink(missing_ok=True)
+        return key
+
     def _load_vision_module(self):
         """Dynamically import trivalaya-vision."""
         vision_path = self.paths.vision_module
@@ -95,26 +141,35 @@ class VisionAdapter:
     def process_image(self, image_path: Path) -> VisionResult:
         """
         Run vision pipeline on an image.
-        
+
         Args:
             image_path: Path to the source image
-            
+
         Returns:
             VisionResult with detected coins
         """
-        image_path = Path(image_path)
-        
-        if not image_path.exists():
-            return VisionResult(
-                status="error",
-                detections=[],
-                error=f"Image not found: {image_path}"
-            )
-        
-        if self._vision_loaded:
-            return self._run_vision_pipeline(image_path)
-        else:
-            return self._run_fallback_detection(image_path)
+        image_path = self._resolve_input_to_local(Path(image_path))
+        temp_dir = self._get_temp_parent(image_path)
+
+        try:
+            if not image_path.exists():
+                return VisionResult(status="error", detections=[], error=f"Image not found: {image_path}")
+
+            if self._vision_loaded:
+                return self._run_vision_pipeline(image_path)
+            else:
+                return self._run_fallback_detection(image_path)
+        finally:
+            if temp_dir is not None:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+    @staticmethod
+    def _get_temp_parent(path: Path) -> Optional[Path]:
+        """Return the triv_vision_in_ temp directory containing path, or None."""
+        for parent in path.parents:
+            if parent.name.startswith("triv_vision_in_"):
+                return parent
+        return None
     
     def _run_vision_pipeline(self, image_path: Path) -> VisionResult:
         """Run the full trivalaya-vision pipeline."""
@@ -231,8 +286,10 @@ class VisionAdapter:
         image_path: Path,
         detections: List[Dict],
         output_dir: Path,
-        base_name: str
+        base_name: str,
+        ctx: VisionJobContext,
     ) -> List[Dict]:
+
         """
         Extract individual coin images from detections.
         
@@ -288,7 +345,10 @@ class VisionAdapter:
             crop = img[y1:y2, x1:x2].copy()
             crop_path = output_dir / f"{base_name}{suffix}_crop.jpg"
             cv2.imwrite(str(crop_path), crop)
-            
+            crop_key = self._vision_key(ctx.version, ctx.site, str(ctx.sale_id), ctx.lot_number, crop_path.name)
+            crop_ref = self._upload_if_spaces(crop_path, crop_key, "image/jpeg")
+
+
             # === Transparent PNG ===
             transparent_path = None
             if self.config.save_transparent:
@@ -300,7 +360,14 @@ class VisionAdapter:
                 transparent = cv2.merge([b, g, r, mask_crop])
                 transparent_path = output_dir / f"{base_name}{suffix}_transparent.png"
                 cv2.imwrite(str(transparent_path), transparent)
-            
+                transparent_key = self._vision_key(
+                    ctx.version, ctx.site, str(ctx.sale_id), ctx.lot_number, transparent_path.name
+                )
+                transparent_ref = self._upload_if_spaces(
+                    transparent_path, transparent_key, "image/png"
+                )
+
+
             # === Normalized (224x224 for ML) ===
             normalized_path = None
             highres_path = None
@@ -319,21 +386,35 @@ class VisionAdapter:
                 normalized = cv2.resize(square, (224, 224), interpolation=cv2.INTER_AREA)
                 normalized_path = output_dir / f"{base_name}{suffix}_224.jpg"
                 cv2.imwrite(str(normalized_path), normalized)
-                
+                normalized_key = self._vision_key(
+                    ctx.version, ctx.site, str(ctx.sale_id), ctx.lot_number, normalized_path.name
+                )
+                normalized_ref = self._upload_if_spaces(
+                    normalized_path, normalized_key, "image/jpeg"
+                )
+
+
                 # 512x512 high-res
                 highres = cv2.resize(square, (512, 512), interpolation=cv2.INTER_AREA)
                 highres_path = output_dir / f"{base_name}{suffix}_512.jpg"
                 cv2.imwrite(str(highres_path), highres)
+                highres_key = self._vision_key(
+                    ctx.version, ctx.site, str(ctx.sale_id), ctx.lot_number, highres_path.name
+                )
+                highres_ref = self._upload_if_spaces(
+                    highres_path, highres_key, "image/jpeg"
+                )
+
             
             # Build result
             geom = layer1.get('geometry', {})
             results.append({
                 'detection_index': i,
                 'inferred_side': side,
-                'crop_path': str(crop_path),
-                'transparent_path': str(transparent_path) if transparent_path else '',
-                'normalized_path': str(normalized_path) if normalized_path else '',
-                'highres_path': str(highres_path) if highres_path else '',
+                'crop_path': crop_ref,
+                'transparent_path': transparent_ref if transparent_path else '',
+                'normalized_path': normalized_ref if normalized_path else '',
+                'highres_path': highres_ref if highres_path else '',
                 'bbox': (x1, y1, x2 - x1, y2 - y1),
                 'circularity': geom.get('circularity', 0),
                 'solidity': geom.get('solidity', 0),

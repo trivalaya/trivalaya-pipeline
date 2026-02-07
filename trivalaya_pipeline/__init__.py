@@ -7,7 +7,7 @@ from .config import PipelineConfig, PathConfig, MLConfig
 from .catalog import CatalogDB, AuctionRecord, CoinDetection, MLDatasetEntry
 from .label_parser import LabelParser, parse_auction_label
 from .vision_adapter import VisionAdapter
-from .ml_exporter import MLExporter
+from .ml_exporter import MLExporter, ExportMode, MissingSideRule, ExportStats
 from .pipeline import Pipeline
 
 __all__ = [
