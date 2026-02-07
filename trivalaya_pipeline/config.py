@@ -139,7 +139,7 @@ class VisionConfig:
     fallback_sensitivity: str = "high"
     
     # Extraction settings
-    crop_margin_ratio: float = 0.05
+    crop_margin_ratio: float = 0.12
     save_transparent: bool = True
     save_normalized: bool = True
     
