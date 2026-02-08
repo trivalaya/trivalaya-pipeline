@@ -4,6 +4,7 @@ Pipeline: Main orchestrator connecting scraper, vision, and ML export.
 This is the primary interface for running the full pipeline.
 """
 
+import shutil
 import sys
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -45,6 +46,14 @@ class Pipeline:
             return int(value)
         except (TypeError, ValueError):
             return default
+
+    @staticmethod
+    def _temp_parent(path: Path) -> Optional[Path]:
+        """Return the triv_vision_in_ temp directory containing *path*, or None."""
+        for parent in path.parents:
+            if parent.name.startswith("triv_vision_in_"):
+                return parent
+        return None
     
     def __init__(
         self,
@@ -211,49 +220,65 @@ class Pipeline:
         records = self.db.get_unprocessed_records(limit=batch_size)
         print(f"Found {len(records)} unprocessed images")
         
+        from .vision_adapter import VisionJobContext
+
         for record in records:
             image_path = Path(record.image_path)
-            
-            if not image_path.exists():
-                stats['skipped'] += 1
-                continue
-            
-            # Run vision
-            result = self.vision.process_image(image_path)
-            
-            if result.status == "error":
-                print(f"  ✗ Error processing {image_path.name}: {result.error}")
-                stats['errors'] += 1
+
+            # Resolve Spaces key → local temp file (or use local path as-is)
+            local_path = self.vision._resolve_input_to_local(image_path)
+            temp_dir = self._temp_parent(local_path)
+
+            try:
+                if not local_path.exists():
+                    stats['skipped'] += 1
+                    continue
+
+                # Run vision
+                result = self.vision.process_image(local_path)
+
+                if result.status == "error":
+                    print(f"  ✗ Error processing {image_path.name}: {result.error}")
+                    stats['errors'] += 1
+                    self.db.mark_vision_processed(record.id)
+                    continue
+
+                if result.status == "no_detections":
+                    stats['skipped'] += 1
+                    self.db.mark_vision_processed(record.id)
+                    continue
+
+                # Extract coins
+                safe_lot = self._safe_int(record.lot_number)
+                base_name = f"{record.auction_house or 'lot'}_{record.sale_id or '0'}_{safe_lot:05d}"
+                output_dir = self.paths.extracted_coins / (record.auction_house or 'unknown') / (record.sale_id or '0')
+
+                ctx = VisionJobContext(
+                    site=record.auction_house or 'unknown',
+                    sale_id=record.sale_id or '0',
+                    lot_number=safe_lot,
+                )
+                extractions = self.vision.extract_coins(
+                    local_path,
+                    result.detections,
+                    output_dir,
+                    base_name,
+                    ctx,
+                )
+
+                # Save to database
+                detections = self.vision.result_to_detections(record.id, extractions)
+                for det in detections:
+                    self.db.insert_detection(det)
+                    stats['detections'] += 1
+
                 self.db.mark_vision_processed(record.id)
-                continue
-            
-            if result.status == "no_detections":
-                stats['skipped'] += 1
-                self.db.mark_vision_processed(record.id)
-                continue
-            
-            # Extract coins
-            safe_lot = self._safe_int(record.lot_number)
-            base_name = f"{record.auction_house or 'lot'}_{record.sale_id or '0'}_{safe_lot:05d}"
-            output_dir = self.paths.extracted_coins / (record.auction_house or 'unknown') / (record.sale_id or '0')
-            
-            extractions = self.vision.extract_coins(
-                image_path,
-                result.detections,
-                output_dir,
-                base_name
-            )
-            
-            # Save to database
-            detections = self.vision.result_to_detections(record.id, extractions)
-            for det in detections:
-                self.db.insert_detection(det)
-                stats['detections'] += 1
-            
-            self.db.mark_vision_processed(record.id)
-            stats['processed'] += 1
-            
-            print(f"  ✓ {image_path.name}: {len(extractions)} coins detected")
+                stats['processed'] += 1
+
+                print(f"  ✓ {image_path.name}: {len(extractions)} coins detected")
+            finally:
+                if temp_dir is not None:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
         
         print(f"\nVision complete: {stats['processed']} images, {stats['detections']} coins")
         return stats

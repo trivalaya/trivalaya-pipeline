@@ -143,33 +143,20 @@ class VisionAdapter:
         Run vision pipeline on an image.
 
         Args:
-            image_path: Path to the source image
+            image_path: Path to a local image file
 
         Returns:
             VisionResult with detected coins
         """
-        image_path = self._resolve_input_to_local(Path(image_path))
-        temp_dir = self._get_temp_parent(image_path)
+        image_path = Path(image_path)
 
-        try:
-            if not image_path.exists():
-                return VisionResult(status="error", detections=[], error=f"Image not found: {image_path}")
+        if not image_path.exists():
+            return VisionResult(status="error", detections=[], error=f"Image not found: {image_path}")
 
-            if self._vision_loaded:
-                return self._run_vision_pipeline(image_path)
-            else:
-                return self._run_fallback_detection(image_path)
-        finally:
-            if temp_dir is not None:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-
-    @staticmethod
-    def _get_temp_parent(path: Path) -> Optional[Path]:
-        """Return the triv_vision_in_ temp directory containing path, or None."""
-        for parent in path.parents:
-            if parent.name.startswith("triv_vision_in_"):
-                return parent
-        return None
+        if self._vision_loaded:
+            return self._run_vision_pipeline(image_path)
+        else:
+            return self._run_fallback_detection(image_path)
     
     def _run_vision_pipeline(self, image_path: Path) -> VisionResult:
         """Run the full trivalaya-vision pipeline."""
